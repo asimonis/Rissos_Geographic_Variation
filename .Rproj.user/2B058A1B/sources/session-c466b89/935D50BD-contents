@@ -39,7 +39,7 @@ saveRDS(data, paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
 #load acoustic study
 data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
 
-#Keep click detections from one channel
+#Keep click detections from one channel (upper hydrophone = HTI-92-WB)
 data<-filter(data, Channel==1)
 #Omit click detectors 0 and 1
 data<-filter(data,detectorName!='Click_Detector_0')

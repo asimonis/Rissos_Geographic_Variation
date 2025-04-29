@@ -1,0 +1,9 @@
+"2","r error 4 (Error in eval(ele) : object 'freshRun' not found
+)"
+"0","    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))"
+"0","    # Double check warning messages"
+"0","    print(getWarnings(data)$message)"
+"1","[1]"
+"1"," ""Found 16 click detections with NA values.\n"""
+"1","
+"

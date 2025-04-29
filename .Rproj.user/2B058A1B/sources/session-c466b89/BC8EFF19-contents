@@ -1,0 +1,106 @@
+---
+title: "Process click events"
+output: html_document
+date: "2025-04-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# When this rmarkdown file is knit:
+# FALSE means it will used saved .rds files instead of re-processing
+# TRUE will run everything from scratch - this will take a long time
+freshRun <- FALSE
+```
+
+## PAMpal Data Processing
+
+Start by loading the required packages
+
+```{r, load packages, message=FALSE}
+library("easypackages")
+libraries("PAMpal","PAMmisc","dplyr",  "here")
+here()
+```
+
+1.  Define details of deployment to process
+
+    ```{r, Set deployment metadata}
+    ###USER-DEFINED FIELDS####
+    baseDir <- 'D:/Analysis/RissosGeographicVariation/'  
+    DriftID<-'ADRIFT_039'
+    binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
+    # this database should be a COPY of the original because we will add events to it later
+    db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
+
+    pps <- PAMpalSettings(db=db, 
+                          binaries = binFolder,
+                          sr_hz='auto', 
+                          winLen_sec=.0025, 
+                          filterfrom_khz=10, 
+                          filterto_khz=80)
+
+    #Import known Risso's dolphin Event Times
+    GgTimes<-read.csv(here('EventTimes','ADRIFT_GgDetections.csv'))
+    GgTimes$start<-as.POSIXct(GgTimes$UTC,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+    GgTimes$end<-as.POSIXct(GgTimes$end,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+    DriftTimes<-filter(GgTimes,DriftName==DriftID)
+    DriftTimes$id<-paste0(DriftID,'_',seq(1:nrow(DriftTimes)))
+    ```
+
+2.  **Set up our PPS** (PAMPal Settings Object) for the deployment
+
+```{r, Process click detections, eval=freshRun}
+#Use event times from CSV file
+data <- processPgDetections(pps, mode='time',grouping=DriftTimes,
+                            format='%m/%d/%y %H:%M',species='Gg',id=DriftID)
+
+#save original acoustic study (before cleaning)
+saveRDS(data, paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+```
+
+2.  [If]{.underline} you have already run the processing code, ensure you have set 'freshRun = FALSE' at top of this document to read in the existing .rds file for downstream processing.
+
+    ```{r, read acoustic study, include=FALSE, eval=!freshRun}
+
+    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+    # Double check warning messages
+    print(getWarnings(data)$message)
+    ```
+
+3.  **Clean click detections**
+
+```{r, Clean click detections, eval=!freshRun}
+
+#Keep click detections from one channel (upper hydrophone = HTI-92-WB)
+data<-filter(data, Channel==1)
+
+#Omit click detectors 0 and 1
+data<-filter(data,detectorName!='Click_Detector_0')
+data<-filter(data,detectorName!='Click_Detector_1')
+data<-filter(data, peak>15 & duration<2000)
+             ClickData<-getClickData(data)
+```
+
+5.  **Add known events to a new copy of the database**
+
+```{r, Add events to database, eval=!freshRun}
+#Add events to database
+for(E in 1:nrow(DriftTimes)){
+  EventClicks<-filter(ClickData,eventId==DriftTimes$id[E])
+  
+  addPgEvent(db,binary = data@events[[E]]@files[["binaries"]],
+             UIDs=EventClicks$UID,
+             eventType='Gg Click Event',
+             start=DriftTimes$start[E],
+             end=DriftTimes$end[E],
+             type='click')
+}
+```
+
+6.  **Review the event mean spectra**
+
+```{r, Plot mean spectra, eval=!freshRun}
+
+#Plot mean spectrum & concatenated spectrogram
+calculateAverageSpectra(data,flim=c(0,100000))
+```
