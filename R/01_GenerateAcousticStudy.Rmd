@@ -1,15 +1,12 @@
 ---
-title: "Process click events"
+title: "Generate Acoustic Study"
 output: html_document
-date: "2025-04-29"
+date: "2025-05-27"
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-# When this rmarkdown file is knit:
-# FALSE means it will used saved .rds files instead of re-processing
-# TRUE will run everything from scratch - this will take a long time
-freshRun <- FALSE
+
 ```
 
 ## PAMpal Data Processing
@@ -49,58 +46,11 @@ here()
 
 2.  **Set up our PPS** (PAMPal Settings Object) for the deployment
 
-```{r, Process click detections, eval=freshRun}
+```{r, Process click detections}
 #Use event times from CSV file
 data <- processPgDetections(pps, mode='time',grouping=DriftTimes,
                             format='%m/%d/%y %H:%M',species='Gg',id=DriftID)
 
 #save original acoustic study (before cleaning)
 saveRDS(data, paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
-```
-
-2.  [If]{.underline} you have already run the processing code, ensure you have set 'freshRun = FALSE' at top of this document to read in the existing .rds file for downstream processing.
-
-    ```{r, read acoustic study, include=FALSE, eval=!freshRun}
-
-    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
-    # Double check warning messages
-    print(getWarnings(data)$message)
-    ```
-
-3.  **Clean click detections**
-
-```{r, Clean click detections}
-
-#Keep click detections from one channel (upper hydrophone = HTI-92-WB)
-data<-filter(data, Channel==1)
-
-#Omit click detectors 0 and 1
-data<-filter(data,detectorName!='Click_Detector_0')
-data<-filter(data,detectorName!='Click_Detector_1')
-data<-filter(data, peak>15 & duration<2000)
-             ClickData<-getClickData(data)
-```
-
-5.  **Add known events to a new copy of the database**
-
-```{r, Add events to database}
-#Add events to database
-for(E in 1:nrow(DriftTimes)){
-  EventClicks<-filter(ClickData,eventId==DriftTimes$id[E])
-  
-  addPgEvent(db,binary = data@events[[E]]@files[["binaries"]],
-             UIDs=EventClicks$UID,
-             eventType='Gg Click Event',
-             start=DriftTimes$start[E],
-             end=DriftTimes$end[E],
-             type='click')
-}
-```
-
-6.  **Review the event mean spectra**
-
-```{r, Plot mean spectra}
-
-#Plot mean spectrum & concatenated spectrogram
-calculateAverageSpectra(data,flim=c(0,100000))
 ```

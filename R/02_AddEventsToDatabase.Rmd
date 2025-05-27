@@ -1,0 +1,75 @@
+---
+title: "AddGgEventsToDatabase"
+output: html_document
+date: "2025-05-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1.  Define details of deployment to process
+
+    ```{r, Set deployment metadata}
+    ###USER-DEFINED FIELDS#### 
+    baseDir <- 'F:/Odontocetes/RissosGeographicVariation/'
+    DriftID<-'ADRIFT_033'
+    binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
+    # this database should be a COPY of the original because we will add events to it later
+    db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
+
+    ```
+
+2.  [Load in acoustic study from an RDS file and Gg times from log]{.underline}
+
+    ```{r, read acoustic study, include=FALSE}
+
+    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+    # Double check warning messages
+    print(getWarnings(data)$message)
+
+    #Import known Risso's dolphin Event Times
+    GgTimes<-read.csv(here('EventTimes','ADRIFT_GgDetections.csv'))
+    GgTimes$start<-as.POSIXct(GgTimes$UTC,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+    GgTimes$end<-as.POSIXct(GgTimes$end,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+    DriftTimes<-filter(GgTimes,DriftName==DriftID)
+    DriftTimes$id<-paste0(DriftID,'_',seq(1:nrow(DriftTimes)))
+    ```
+
+3.  **Clean click detections**
+
+```{r, Clean click detections}
+
+#Keep click detections from one channel (upper hydrophone = HTI-92-WB)
+data<-filter(data, Channel==1)
+
+#Omit click detectors 0 and 1
+data<-filter(data,detectorName!='Click_Detector_0')
+data<-filter(data,detectorName!='Click_Detector_1')
+data<-filter(data, peak>15 & duration<2000)
+ClickData<-getClickData(data)
+```
+
+3.  **Add known events to a new copy of the database**
+
+```{r, Add events to database}
+#Add events to database
+for(E in 1:nrow(DriftTimes)){
+  EventClicks<-filter(ClickData,eventId==DriftTimes$id[E])
+  
+  addPgEvent(db,binary = data@events[[E]]@files[["binaries"]],
+             UIDs=EventClicks$UID,
+             eventType='Gg Click Event',
+             start=DriftTimes$start[E],
+             end=DriftTimes$end[E],
+             type='click')
+}
+```
+
+4.  **Review the event mean spectra**
+
+```{r, Plot mean spectra}
+
+#Plot mean spectrum & concatenated spectrogram
+calculateAverageSpectra(data,flim=c(0,100000))
+```
