@@ -8,11 +8,21 @@ date: "2025-05-27"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+## PAMpal Data Processing
+
+Start by loading the required packages
+
+```{r, load packages, message=FALSE}
+library("easypackages")
+libraries("PAMpal","PAMmisc","dplyr",  "here")
+here()
+```
+
 1.  Define details of deployment to process
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS#### 
-    baseDir <- 'F:/Odontocetes/RissosGeographicVariation/'
+    baseDir <- 'E:/Analysis/'
     DriftID<-'ADRIFT_033'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
