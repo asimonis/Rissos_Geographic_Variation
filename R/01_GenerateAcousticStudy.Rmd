@@ -39,9 +39,14 @@ here()
     #Import known Risso's dolphin Event Times
     GgTimes<-read.csv(here('EventTimes','ADRIFT_GgDetections.csv'))
     GgTimes$start<-as.POSIXct(GgTimes$UTC,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+
+    #Define end time. For CCES, this will be 2 minutes after file start time
     GgTimes$end<-as.POSIXct(GgTimes$end,format='%Y-%m-%d %H:%M:%S',tz='UTC')
     DriftTimes<-filter(GgTimes,DriftName==DriftID)
     DriftTimes$id<-paste0(DriftID,'_',seq(1:nrow(DriftTimes)))
+
+    if(substr(DriftID,1,4)=='CCES'){
+      DriftTimes$end<-DriftTimes$start + seconds(119) }
     ```
 
 2.  **Set up our PPS** (PAMPal Settings Object) for the deployment
