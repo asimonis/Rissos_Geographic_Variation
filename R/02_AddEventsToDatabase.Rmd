@@ -14,6 +14,7 @@ Start by loading the required packages
 
 ```{r, load packages, message=FALSE}
 library("easypackages")
+library("lubridate")
 libraries("PAMpal","PAMmisc","dplyr",  "here")
 here()
 ```
@@ -23,7 +24,7 @@ here()
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS#### 
     baseDir <- 'E:/Analysis/'
-    DriftID<-'ADRIFT_033'
+    DriftID<-'CCES_007'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
@@ -44,6 +45,8 @@ here()
     GgTimes$end<-as.POSIXct(GgTimes$end,format='%Y-%m-%d %H:%M:%S',tz='UTC')
     DriftTimes<-filter(GgTimes,DriftName==DriftID)
     DriftTimes$id<-paste0(DriftID,'_',seq(1:nrow(DriftTimes)))
+      if(substr(DriftID,1,4)=='CCES'){
+          DriftTimes$end<-DriftTimes$start + seconds(119) }
     ```
 
 3.  **Clean click detections**

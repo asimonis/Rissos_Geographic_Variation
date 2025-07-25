@@ -15,6 +15,7 @@ Start by loading the required packages
 
 ```{r, load packages, message=FALSE}
 library("easypackages")
+library("lubridate")
 libraries("PAMpal","PAMmisc","dplyr",  "here")
 here()
 ```
@@ -23,8 +24,8 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS####
-    baseDir <- 'F:/Odontocetes/RissosGeographicVariation/'  
-    DriftID<-'ADRIFT_033'
+    baseDir <- 'E:/Analysis/'  
+    DriftID<-'CCES_013'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
@@ -39,9 +40,14 @@ here()
     #Import known Risso's dolphin Event Times
     GgTimes<-read.csv(here('EventTimes','ADRIFT_GgDetections.csv'))
     GgTimes$start<-as.POSIXct(GgTimes$UTC,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+
+    #Define end time. For CCES, this will be 2 minutes after file start time
     GgTimes$end<-as.POSIXct(GgTimes$end,format='%Y-%m-%d %H:%M:%S',tz='UTC')
     DriftTimes<-filter(GgTimes,DriftName==DriftID)
     DriftTimes$id<-paste0(DriftID,'_',seq(1:nrow(DriftTimes)))
+
+    if(substr(DriftID,1,4)=='CCES'){
+      DriftTimes$end<-DriftTimes$start + seconds(119) }
     ```
 
 2.  **Set up our PPS** (PAMPal Settings Object) for the deployment
