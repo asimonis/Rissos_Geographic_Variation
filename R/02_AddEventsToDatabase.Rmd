@@ -15,7 +15,7 @@ Start by loading the required packages
 ```{r, load packages, message=FALSE}
 library("easypackages")
 library("lubridate")
-libraries("PAMpal","PAMmisc","dplyr",  "here")
+libraries("PAMpal","PAMmisc","dplyr",  "here",'beepr')
 here()
 ```
 
@@ -23,8 +23,8 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS#### 
-    baseDir <- 'E:/Analysis/'
-    DriftID<-'CCES_007'
+    baseDir <- 'D:/Analysis/'
+    DriftID<-'ADRIFT_087'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
@@ -85,4 +85,5 @@ for(E in 1:nrow(DriftTimes)){
 
 #Plot mean spectrum & concatenated spectrogram
 calculateAverageSpectra(data,flim=c(0,100000))
+beep()
 ```

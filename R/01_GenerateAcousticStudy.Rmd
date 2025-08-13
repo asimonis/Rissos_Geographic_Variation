@@ -16,7 +16,7 @@ Start by loading the required packages
 ```{r, load packages, message=FALSE}
 library("easypackages")
 library("lubridate")
-libraries("PAMpal","PAMmisc","dplyr",  "here")
+libraries("PAMpal","PAMmisc","dplyr",  "here",'beepr')
 here()
 ```
 
@@ -24,8 +24,8 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS####
-    baseDir <- 'E:/Analysis/'  
-    DriftID<-'CCES_013'
+    baseDir <- 'D:/Analysis/'  
+    DriftID<-'ADRIFT_077'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
@@ -59,4 +59,5 @@ data <- processPgDetections(pps, mode='time',grouping=DriftTimes,
 
 #save original acoustic study (before cleaning)
 saveRDS(data, paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+beep()
 ```
