@@ -72,7 +72,7 @@ suppressPackageStartupMessages({
   library(stringr)
 })
 
-out_root <- "E:/Analysis/SpectrogramsAndSpectra"
+out_root <-  file.path(baseDir,'SpectrogramsAndSpectra')
 drift_dir <- fs::path(out_root, DriftID)
 dir_create(drift_dir)
 
