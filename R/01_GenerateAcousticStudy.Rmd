@@ -24,8 +24,8 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS####
-    baseDir <- 'D:/Analysis/'  
-    DriftID<-'ADRIFT_077'
+    baseDir <- 'E:/Analysis/'  
+    DriftID<-'ADRIFT_012'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')

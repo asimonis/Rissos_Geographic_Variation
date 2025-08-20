@@ -1,0 +1,142 @@
+---
+title: "Create and Save Spectrograms"
+output: html_document
+date: "2025-08-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## PAMpal Data Processing
+
+Start by loading the required packages
+
+```{r, load packages, message=FALSE}
+library("easypackages")
+library("lubridate")
+libraries("PAMpal","PAMmisc","dplyr",  "here",'beepr')
+here()
+```
+
+1.  **Define details of deployment to process**
+
+    ```{r, Set deployment metadata}
+    ###USER-DEFINED FIELDS#### 
+    baseDir <- 'E:/Analysis/'
+    DriftID<-'ADRIFT_003'
+    binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
+    # this database should be a COPY of the original because we will add events to it later
+    db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
+
+    ```
+
+2.  **Load in acoustic study from an RDS file and Gg times from log**
+
+    ```{r, read acoustic study, include=FALSE}
+
+    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+    # Double check warning messages
+    print(getWarnings(data)$message)
+
+    #Import known Risso's dolphin Event Times
+    GgTimes<-read.csv(here('EventTimes','ADRIFT_GgDetections.csv'))
+    GgTimes$start<-as.POSIXct(GgTimes$UTC,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+    GgTimes$end<-as.POSIXct(GgTimes$end,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+    DriftTimes<-filter(GgTimes,DriftName==DriftID)
+    DriftTimes$id<-paste0(DriftID,'_',seq(1:nrow(DriftTimes)))
+      if(substr(DriftID,1,4)=='CCES'){
+          DriftTimes$end<-DriftTimes$start + seconds(119) }
+    ```
+
+3.  **Clean click detections**
+
+```{r, Clean click detections}
+
+#Keep click detections from one channel (upper hydrophone = HTI-92-WB)
+data<-filter(data, Channel==1)
+
+#Omit click detectors 0 and 1
+data<-filter(data,detectorName!='Click_Detector_0')
+data<-filter(data,detectorName!='Click_Detector_1')
+data<-filter(data, peak>15 & duration<2000)
+ClickData<-getClickData(data)
+```
+
+5. **Prepare and save spectra and spectrograms**
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(fs)
+  library(stringr)
+})
+
+out_root <- "E:/Analysis/SpectrogramsAndSpectra"
+drift_dir <- fs::path(out_root, DriftID)
+dir_create(drift_dir)
+
+#Determine event indices
+if (exists("DriftTimes")) {
+  event_ids <- seq_len(nrow(DriftTimes))
+} else if (exists("ClickData") && "eventId" %in% names(ClickData)) {
+  event_ids <- sort(unique(na.omit(as.integer(ClickData$eventId))))
+} else {
+  stop("Can't determine events: need DriftTimes or ClickData$eventId.")
+}
+cat(sprintf("Drift %s: %s event(s)\n", DriftID, length(event_ids)))
+
+#Pre-create all event folders
+event_names <- paste0(DriftID, "_Event_", str_pad(event_ids, 3, pad = "0"))
+event_dirs  <- fs::path(drift_dir, event_names)
+fs::dir_create(event_dirs)
+
+#Loop: one call per event -> two plots auto-saved -> rename
+for (k in seq_along(event_ids)) {
+  i      <- event_ids[k]
+  ev_dir <- event_dirs[k]
+  ev_tag <- event_names[k]
+
+  #Temp pattern with %d to capture both plots
+  pattern <- fs::path(ev_dir, paste0(ev_tag, "_%02d.png"))
+  png(filename = pattern, width = 1600, height = 1000, res = 150, bg = "white")
+  calculateAverageSpectra(data, flim = c(0, 100000), evNum = i)
+  dev.off()
+
+  #Paths for the auto-saved plots
+  img1 <- fs::path(ev_dir, paste0(ev_tag, "_01.png"))
+  img2 <- fs::path(ev_dir, paste0(ev_tag, "_02.png"))
+
+  #Desired names: Spectrogram_XXX.png and Spectrum_XXX.png
+  suffix <- str_pad(i, 3, pad = "0")
+  spg_dst  <- fs::path(ev_dir, paste0("Event_", suffix, "_Spectrogram.png"))
+  spec_dst <- fs::path(ev_dir, paste0("Event_", suffix, "_Spectrum.png"))
+
+  #Assume 01 = Spectrogram, 02 = Spectrum (swap if reversed)
+  file_move(img1, spg_dst)
+  file_move(img2, spec_dst)
+
+  message(sprintf("Saved %s and %s", basename(spg_dst), basename(spec_dst)))
+}
+
+cat(sprintf("\nDone. Saved spectrogram + spectrum for %s event(s).\nBase folder:\n%s\n",
+            length(event_ids), drift_dir))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -23,8 +23,8 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS#### 
-    baseDir <- 'D:/Analysis/'
-    DriftID<-'ADRIFT_087'
+    baseDir <- 'E:/Analysis/'
+    DriftID<-'ADRIFT_012'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
@@ -63,7 +63,7 @@ data<-filter(data, peak>15 & duration<2000)
 ClickData<-getClickData(data)
 ```
 
-3.  **Add known events to a new copy of the database**
+4.  **Add known events to a new copy of the database**
 
 ```{r, Add events to database}
 #Add events to database
@@ -79,7 +79,7 @@ for(E in 1:nrow(DriftTimes)){
 }
 ```
 
-4.  **Review the event mean spectra**
+5.  **Review the event mean spectra**
 
 ```{r, Plot mean spectra}
 
