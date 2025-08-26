@@ -24,7 +24,7 @@ here()
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS#### 
     baseDir <- 'E:/Analysis/'
-    DriftID<-'ADRIFT_003'
+    DriftID<-'PASCAL_009'
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
@@ -63,7 +63,7 @@ data<-filter(data, peak>15 & duration<2000)
 ClickData<-getClickData(data)
 ```
 
-5. **Prepare and save spectra and spectrograms**
+4. **Prepare and save spectra and spectrograms**
 
 ```{r}
 
