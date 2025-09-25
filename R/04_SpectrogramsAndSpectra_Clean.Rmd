@@ -1,8 +1,10 @@
 ---
-title: "Create and Save Spectrograms"
+title: "Create and Save Cleaned Spectrograms"
+author: "Sarah Shiers"
+date: "2025-09-25"
 output: html_document
-date: "2025-08-20"
 ---
+
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -34,8 +36,19 @@ here()
 2.  **Load in acoustic study from an RDS file and Gg times from log**
 
     ```{r, read acoustic study, include=FALSE}
-
-    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+    
+    #For generating new visuals use the following
+             pps <- PAMpalSettings(db=db, 
+                                  binaries = binFolder,
+                                  sr_hz='auto', 
+                                  winLen_sec=.0025, 
+                                  filterfrom_khz=10, 
+                                  filterto_khz=80)
+            
+            data <- processPgDetections(pps, mode='db',id=DriftID)
+        
+            saveRDS(data, paste0(baseDir,'AcousticStudies/',DriftID,'_Gg_clean.rds'))
+            beep()
     
     # Double check warning messages
     print(getWarnings(data)$message)
@@ -110,8 +123,8 @@ for (k in seq_along(event_ids)) {
 
   #Desired names: Spectrogram_XXX.png and Spectrum_XXX.png
   suffix <- str_pad(i, 3, pad = "0")
-  spg_dst  <- fs::path(ev_dir, paste0("Event_", suffix, "_Spectrogram.png"))
-  spec_dst <- fs::path(ev_dir, paste0("Event_", suffix, "_Spectrum.png"))
+  spg_dst  <- fs::path(ev_dir, paste0("Event_", suffix, "_Spectrogram_Clean.png"))
+  spec_dst <- fs::path(ev_dir, paste0("Event_", suffix, "_Spectrum_Clean.png"))
 
   #Assume 01 = Spectrogram, 02 = Spectrum (swap if reversed)
   file_move(img1, spg_dst)
@@ -124,20 +137,3 @@ cat(sprintf("\nDone. Saved spectrogram + spectrum for %s event(s).\nBase folder:
             length(event_ids), drift_dir))
 
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
