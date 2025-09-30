@@ -7,14 +7,73 @@
 # 4. Calculate summary statistics (total number of clicks, mean, median, IQR)
 
 
+
+
+#Start by loading the required packages
+
+library("easypackages")
+library("lubridate")
+libraries("PAMpal","PAMmisc","dplyr",  "here",'beepr')
+here()
+
+#Define details of deployment to process
+  
+###USER-DEFINED FIELDS#### 
+baseDir <- 'E:/Analysis/'
+DriftID<-'CCES_013'
+binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
+# this database should be a COPY of the original because we will add events to it later
+db <- paste0(baseDir,'Databases/',DriftID,' - Clean.sqlite3')
+
+
+#Load in acoustic study from an RDS file and Gg times from log
+
+data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+
+# Double check warning messages
+print(getWarnings(data)$message)
+
+#Import known Risso's dolphin Event Times
+GgTimes<-read.csv(here('EventTimes','ADRIFT_GgDetections.csv'))
+GgTimes$start<-as.POSIXct(GgTimes$UTC,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+GgTimes$end<-as.POSIXct(GgTimes$end,format='%Y-%m-%d %H:%M:%S',tz='UTC')
+DriftTimes<-filter(GgTimes,DriftName==DriftID)
+DriftTimes$id<-paste0(DriftID,'_',seq(1:nrow(DriftTimes)))
+
+if(substr(DriftID,1,4)=='CCES'){
+  DriftTimes$end<-DriftTimes$start + seconds(119) }
+
+#Clean click detections
+
+#Keep click detections from one channel (upper hydrophone = HTI-92-WB)
+data<-filter(data, Channel==1)
+
+#Omit click detectors 0 and 1
+data<-filter(data,detectorName!='Click_Detector_0')
+data<-filter(data,detectorName!='Click_Detector_1')
+data<-filter(data, peak>15 & duration<2000)
+ClickData<-getClickData(data)
+
 ClickSummary <- ClickData %>%
   group_by(eventId)%>%
   summarise(ClickNum = n())
 
-#only do this for 1st acoustic study
-AllEvents<-data.frame(ClickSummary)
 
+
+
+
+#only do this for 1st acoustic study
+  #AllEvents<-data.frame(ClickSummary)
+
+
+  
 AllEvents<-rbind(ClickSummary,  AllEvents)
 
 #Save AllEvents file to Github repository
-saveRDS(data, paste0(here('data','AllEventSummary.rds'))
+  saveRDS(data, paste0(here('data'), '/AllEventSummary.rds'))
+
+  
+install.packages("writexl")
+library(writexl)        
+AllEvents <- readRDS('C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/Data/AllEventSummary.rds')
+write_xlsx(AllEvents, 'C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/data/AllEventSummary.xlsx')
