@@ -1,0 +1,39 @@
+---
+title: "Geographic Variation in Echolocation Clicks of Risso's Dolphins in the California Current"
+format: 
+  pdf:
+    toc: false
+crossref:
+  fig-labels: arabic    
+  tbl-labels: roman    
+  subref-labels: alpha a 
+editor: visual
+---
+
+## **Authors**
+
+Moseley, Sarah MS.; Simonis, Anne E., Hines, Ellen; Roch, Marie
+
+# Abstract
+
+# Acknowledgements
+
+# Introduction
+
+# Abstract
+
+## Goal of this study
+
+# Methods
+
+## Data Collection
+
+## Data Analysis
+
+### Detection
+
+### Statistical Analysis
+
+# Results
+
+# Discussion
