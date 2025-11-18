@@ -23,19 +23,21 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS#### 
-    baseDir <- 'E:/Analysis/'
-    DriftID<-'ADRIFT_012'
-    binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
+    baseDir <- here('data')
+    DriftID<-'ADRIFT_055'
+    binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
-    db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
+    db <- paste0(baseDir,'/Databases/',DriftID,' - Copy.sqlite3')
 
     ```
 
 2.  [Load in acoustic study from an RDS file and Gg times from log]{.underline}
 
     ```{r, read acoustic study, include=FALSE}
-
     data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+    #Update known location of database and binaries for this acoustic study
+    data<-updateFiles(data)
+
     # Double check warning messages
     print(getWarnings(data)$message)
 
@@ -52,7 +54,6 @@ here()
 3.  **Clean click detections**
 
 ```{r, Clean click detections}
-
 #Keep click detections from one channel (upper hydrophone = HTI-92-WB)
 data<-filter(data, Channel==1)
 
@@ -61,6 +62,23 @@ data<-filter(data,detectorName!='Click_Detector_0')
 data<-filter(data,detectorName!='Click_Detector_1')
 data<-filter(data, peak>15 & duration<2000)
 ClickData<-getClickData(data)
+
+#Keep subset of data for events with more than 100,000 clicks
+TooBig<-ClickData %>%
+  group_by(eventId) %>%
+  summarize(TotalClicks = n()) %>%
+  filter(TotalClicks>100000) 
+
+#For events with large sample sizes, randomly select 80% of clicks to remove
+for(b in 1:nrow(TooBig)){
+
+IgnoreClicks<-ClickData %>%
+  filter(eventId==TooBig$eventId[b]) %>%
+  slice_sample(prop=0.8)
+
+ClickData<-ClickData %>%
+  filter(!UID %in% IgnoreClicks$UID)
+}
 ```
 
 4.  **Add known events to a new copy of the database**
@@ -77,6 +95,7 @@ for(E in 1:nrow(DriftTimes)){
              end=DriftTimes$end[E],
              type='click')
 }
+beep()
 ```
 
 5.  **Review the event mean spectra**

@@ -63,5 +63,5 @@ for(d in 1:length(GgDrifts)){
 
 EventsToRemove<-c(Events_MixedSpp,Events_Near_GgStart,Events_Near_GgEnd)
 sort(EventsToRemove)
-write.csv(EventsToRemove,file=here('EventTimes','GgEventsToRemove.csv'),
-          row.names = F,col.names = F)
+write.table(EventsToRemove,file=here('EventTimes','GgEventsToRemove.csv'),
+          row.names = F,col.names='EventName')
