@@ -23,11 +23,11 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS#### 
-    baseDir <- 'E:/Analysis/'
-    DriftID<-'ADRIFT_006'
-    binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
+    baseDir <- here('data')
+    DriftID<-'ADRIFT_055'
+    binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
-    db <- paste0(baseDir,'Databases/',DriftID,' - Clean.sqlite3')
+    db <- paste0(baseDir,'/Databases/',DriftID,' - Clean.sqlite3')
 
     ```
 
@@ -35,8 +35,9 @@ here()
 
     ```{r, read acoustic study, include=FALSE}
 
-    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
-    
+    data<-readRDS(paste0(baseDir,'/AcousticStudies/',DriftID,'_Gg.rds'))
+    #Update known location of database and binaries for this acoustic study
+    data<-updateFiles(data)
     # Double check warning messages
     print(getWarnings(data)$message)
 
@@ -62,9 +63,26 @@ data<-filter(data,detectorName!='Click_Detector_0')
 data<-filter(data,detectorName!='Click_Detector_1')
 data<-filter(data, peak>15 & duration<2000)
 ClickData<-getClickData(data)
+
+#Keep subset of data for events with more than 100,000 clicks
+TooBig<-ClickData %>%
+  group_by(eventId) %>%
+  summarize(TotalClicks = n()) %>%
+  filter(TotalClicks>100000) 
+
+#For events with large sample sizes, randomly select 80% of clicks to remove
+for(b in 1:nrow(TooBig)){
+
+IgnoreClicks<-ClickData %>%
+  filter(eventId==TooBig$eventId[b]) %>%
+  slice_sample(prop=0.8)
+
+ClickData<-ClickData %>%
+  filter(!UID %in% IgnoreClicks$UID)
+}
 ```
 
-4. **Prepare and save spectra and spectrograms**
+4.  **Prepare and save spectra and spectrograms**
 
 ```{r}
 
@@ -124,20 +142,3 @@ cat(sprintf("\nDone. Saved spectrogram + spectrum for %s event(s).\nBase folder:
             length(event_ids), drift_dir))
 
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
