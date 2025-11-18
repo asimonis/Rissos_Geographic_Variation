@@ -13,14 +13,19 @@
 
 library("easypackages")
 library("lubridate")
-libraries("PAMpal","PAMmisc","dplyr",  "here",'beepr')
+library("ggplot2")
+library("PAMpal")
+library("PAMmisc")
+library("dplyr")
+library("here")
+library("beepr")
 here()
 
 #Define details of deployment to process
   
 ###USER-DEFINED FIELDS#### 
 baseDir <- 'E:/Analysis/'
-DriftID<-'CCES_013'
+DriftID<-'PASCAL_012'
 binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
 # this database should be a COPY of the original because we will add events to it later
 db <- paste0(baseDir,'Databases/',DriftID,' - Clean.sqlite3')
@@ -63,17 +68,47 @@ ClickSummary <- ClickData %>%
 
 
 #only do this for 1st acoustic study
-  #AllEvents<-data.frame(ClickSummary)
+  #All_Useable_Events<-data.frame(ClickSummary)
 
 
   
-AllEvents<-rbind(ClickSummary,  AllEvents)
+All_Useable_Events<-rbind(ClickSummary,  All_Useable_Events)
 
-#Save AllEvents file to Github repository
-  saveRDS(data, paste0(here('data'), '/AllEventSummary.rds'))
+#Save All_Useable_Events file to Github repository
+  saveRDS(All_Useable_Events, paste0(here('data'), '/All_Useable_Events_Summary.rds'))
 
   
 install.packages("writexl")
 library(writexl)        
-AllEvents <- readRDS('C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/Data/AllEventSummary.rds')
-write_xlsx(AllEvents, 'C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/data/AllEventSummary.xlsx')
+AllEvents <- readRDS('C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/Data/All_Useable_Events_Summary.rds')
+write_xlsx(AllEvents, 'C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/data/All_Useable_Events_Summary.xlsx')
+
+
+
+#To create histogram
+Data <- readxl::read_xlsx('C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/data/All_Useable_Events_Summary.xlsx')
+
+Data$species <- as.factor("Gg")
+
+ggplot(Data,aes(species, ClickNum))+geom_violin()
+
+ggplot(Data,aes(ClickNum))+geom_histogram(bins = 100)+ggtitle("Distribution of Clicks Per Useable Event")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
