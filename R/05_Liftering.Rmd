@@ -1,0 +1,128 @@
+---
+title: "05_Lifter_Events"
+output: html_document
+date: "2025-11-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Start by loading the required packages
+
+```{r, load packages, message=FALSE}
+library("easypackages") 
+libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate")
+```
+
+## Define PAMpal settings
+
+```{r}
+###USER-DEFINED FIELDS####
+baseDir <- here('data')
+DriftID<-'ADRIFT_006'
+binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
+
+# this database should be the cleaned copy
+db <- paste0(baseDir,'/Databases/',DriftID,' - Clean.sqlite3')
+
+pps <- PAMpalSettings(db=db, 
+                      binaries = binFolder,
+                      sr_hz='auto', 
+                      winLen_sec=.0025, 
+                      filterfrom_khz=10, 
+                      filterto_khz=80)
+```
+
+## Define custom liftering function
+
+Follow general approach of Soldevilla et al 2017. Apply high-pass lifter to remove first 6 quefrencies.
+
+```{r}
+# High-pass liftering for click waveforms (magnitude-cepstrum HP lifter)
+hpLifterClick <- function(
+  data,                     # PAMpal passes a ClickDetector data bundle here
+  calibration = NULL,       # keep in signature to match PAMpal's expectations
+  n_remove = 6,             # remove first n+1 quefrency bins incl. 0 (default 6)
+  return_wave = TRUE        # store filtered waveform in a list-column
+) {
+  # data$wave: matrix [samples x channels], data$sr: sample rate
+  W  <- data$wave
+  sr <- data$sr
+  nC <- ncol(W)
+
+  out <- vector("list", nC)
+
+  for (ch in seq_len(nC)) {
+    x <- as.numeric(W[, ch])
+    N <- length(x)
+
+    if (!length(x) || all(!is.finite(x))) {
+      out[[ch]] <- list(
+        liftered_wave = if (return_wave) list(NA_real_) else NULL,
+        rms_before = NA_real_,
+        rms_after  = NA_real_,
+        lifter_n   = n_remove,
+        sr         = sr,
+        channel    = ch
+      )
+      next
+    }
+
+    # FFT -> log magnitude -> real cepstrum
+    X    <- stats::fft(x)
+    mag  <- Mod(X)
+    phs  <- Arg(X)
+    logS <- log(pmax(mag, .Machine$double.eps))
+    cep  <- Re(stats::fft(logS, inverse = TRUE)) / N
+
+    # High-pass lifter: zero 0..n_remove and their symmetric (wrapped) indices
+    k      <- 0:n_remove
+    idx_lo <- 1 + k
+    idx_hi <- N - k
+    cep[idx_lo] <- 0
+    cep[idx_hi] <- 0
+
+    # Rebuild log spectrum, magnitude, reapply original phase
+    logS_f  <- Re(stats::fft(cep))
+    mag_f   <- exp(logS_f)
+    X_f     <- mag_f * exp(1i * phs)
+    x_f     <- Re(stats::fft(X_f, inverse = TRUE)) / N
+
+    out[[ch]] <- list(
+      liftered_wave = if (return_wave) list(x_f) else NULL,
+      rms_before = sqrt(mean(x^2)),
+      rms_after  = sqrt(mean(x_f^2)),
+      lifter_n   = n_remove,
+      sr         = sr,
+      channel    = ch
+    )
+  }
+
+  # return one row per channel (data.frame/tibble ok)
+  do.call(rbind.data.frame, lapply(out, as.data.frame))
+}
+
+```
+
+## Generate New Acoustic Study
+
+```{r}
+#Add liftering function
+pps <- addFunction(pps, hpLifterClick, module = "ClickDetector", verbose = TRUE)
+
+# Re-run processing (uses your existing DB + settings)
+study2 <- processPgDetections(pps)
+
+# Retrieve the outputs from this function for all clicks:
+lifters <- getDetectorData(study2, detector = "ClickDetector", fun = "hpLifterClick")
+
+```
+
+## Plot Concatenated Spectrograms of Liftered Events
+
+```{r}
+#Plot mean spectrum & concatenated spectrogram 
+calculateAverageSpectra(study2,flim=c(0,100000)) 
+beep()
+```

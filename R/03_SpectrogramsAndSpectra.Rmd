@@ -71,14 +71,16 @@ TooBig<-ClickData %>%
   filter(TotalClicks>100000) 
 
 #For events with large sample sizes, randomly select 80% of clicks to remove
+#Take exact same sample as taken when adding events to the database
 for(b in 1:nrow(TooBig)){
+set.seed(1)
 
-IgnoreClicks<-ClickData %>%
+KeepClicks<-ClickData %>%
   filter(eventId==TooBig$eventId[b]) %>%
-  slice_sample(prop=0.8)
+  slice_sample(prop=0.15)
 
 ClickData<-ClickData %>%
-  filter(!UID %in% IgnoreClicks$UID)
+  filter(!UID %in% KeepClicks$UID)
 }
 ```
 

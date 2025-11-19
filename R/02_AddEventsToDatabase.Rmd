@@ -34,7 +34,7 @@ here()
 2.  [Load in acoustic study from an RDS file and Gg times from log]{.underline}
 
     ```{r, read acoustic study, include=FALSE}
-    data<-readRDS(paste0(baseDir,'AcousticStudies/',DriftID,'_Gg.rds'))
+    data<-readRDS(paste0(baseDir,'/AcousticStudies/',DriftID,'_Gg.rds'))
     #Update known location of database and binaries for this acoustic study
     data<-updateFiles(data)
 
@@ -71,31 +71,44 @@ TooBig<-ClickData %>%
 
 #For events with large sample sizes, randomly select 80% of clicks to remove
 for(b in 1:nrow(TooBig)){
+set.seed(1)
 
 IgnoreClicks<-ClickData %>%
   filter(eventId==TooBig$eventId[b]) %>%
-  slice_sample(prop=0.8)
+  slice_sample(prop=0.80)
 
-ClickData<-ClickData %>%
+data<-data %>%
+  filter(!UID %in% IgnoreClicks$UID)
+ClickData<-ClickData %>% 
   filter(!UID %in% IgnoreClicks$UID)
 }
 ```
 
 4.  **Add known events to a new copy of the database**
 
-```{r, Add events to database}
-#Add events to database
-for(E in 1:nrow(DriftTimes)){
-  EventClicks<-filter(ClickData,eventId==DriftTimes$id[E])
-  
-  addPgEvent(db,binary = data@events[[E]]@files[["binaries"]],
-             UIDs=EventClicks$UID,
-             eventType='Gg Click Event',
-             start=DriftTimes$start[E],
-             end=DriftTimes$end[E],
-             type='click')
+```{r}
+
+CD <- as.data.table(ClickData)
+setkey(CD, eventId)
+uid_by_event <- CD[, .(UIDs = list(UID)), by = eventId]
+uid_lookup <- setNames(uid_by_event$UIDs, uid_by_event$eventId)
+
+db_path <- "C:/Users/annes/Documents/Github/Rissos_Geographic_Variation/data/Databases/ADRIFT_055 - Copy.sqlite3"   # <- must be a single character string
+
+
+for (i in seq_len(nrow(DriftTimes))) {
+  id <- DriftTimes$id[i]
+  addPgEvent(
+    db_path,  # or your original PAMpal db handle variable
+    binary    = bin_by_event[[as.character(id)]],
+    UIDs      = uid_lookup[[as.character(id)]],
+    eventType = "Gg Click Event",
+    start     = DriftTimes$start[i],
+    end       = DriftTimes$end[i],
+    type      = "click"
+  )
 }
-beep()
+
 ```
 
 5.  **Review the event mean spectra**
