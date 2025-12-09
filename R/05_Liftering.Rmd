@@ -40,93 +40,70 @@ Follow general approach of Soldevilla et al 2017. Apply high-pass lifter to remo
 
 ```{r}
 # High-pass liftering for click waveforms (magnitude-cepstrum HP lifter)
-hpLifterClick <- function(
-  data,                     # PAMpal passes a ClickDetector data bundle here
-  calibration = NULL,       # keep in signature to match PAMpal's expectations
-  n_remove = 6,             # remove first n+1 quefrency bins incl. 0 (default 6)
-  return_wave = TRUE        # store filtered waveform in a list-column
-) {
-  # List required packages (PAMpal pattern)
-  packageList <- c("dplyr")
-  for(p in packageList) {
-    if (!require(p, character.only = TRUE)) {
-      install.packages(p)
-      require(p, character.only = TRUE)
-    }
+hpLifterClick <- function(data,
+                          calibration = NULL,
+                          n_remove    = 6,
+                          return_wave = TRUE,
+                          chan        = 1,
+                          ...) {
+  # data$wave: matrix, rows = samples, cols = channels
+  # data$sr  : sample rate (Hz)
+  
+  # --- basic checks & setup ---
+  if (is.null(data$wave)) {
+    stop("data$wave is NULL – hpLifterClick expects data$wave to be a matrix.")
   }
-
-  W  <- data$wave                 # matrix: samples x channels
-  sr <- data$sr
-  nC <- ncol(W)
-
-  # one entry per channel
-  result <- vector("list", nC)
-
-  for (ch in seq_len(nC)) {
-    x <- as.numeric(W[, ch])
-    N <- length(x)
-
-    # storage for this channel – IMPORTANT:
-    # same names for every channel
-    thisResult <- list()
-
-    # Handle pathological cases safely (too short, all zeros, etc.)
-    if (N <= (n_remove + 1) || all(is.na(x)) || all(x == 0)) {
-      thisResult$lifter_ok       <- FALSE
-      thisResult$n_samples       <- N
-      thisResult$n_remove        <- n_remove
-      thisResult$sample_rate     <- sr
-      if (return_wave) {
-        # list-column; we can store NA instead of a waveform
-        thisResult$liftered_wave <- list(rep(NA_real_, N))
-      }
-      result[[ch]] <- thisResult
-      next
-    }
-
-    ## ----- Cepstrum-based high-pass lifter -----
-
-    # FFT of waveform
-    X <- fft(x)
-
-    # log-magnitude spectrum (avoid log(0))
-    S <- log(Mod(X) + .Machine$double.eps)
-
-    # real cepstrum (IFFT of log-mag spectrum)
-    c <- Re(fft(S, inverse = TRUE)) / N
-
-    # high-pass lifter: zero first (n_remove + 1) quefrency bins
-    c_hp <- c
-    c_hp[seq_len(min(n_remove + 1, N))] <- 0
-
-    # back to (log-magnitude) spectrum
-    S_hp <- fft(c_hp)
-    mag_hp <- exp(Re(S_hp))       # new magnitude spectrum
-
-    # preserve original phase
-    Y <- mag_hp * exp(1i * Arg(X))
-
-    # inverse FFT to time domain
-    y <- Re(fft(Y, inverse = TRUE)) / N
-
-    ## ----- Store outputs for this channel -----
-
-    thisResult$lifter_ok   <- TRUE
-    thisResult$n_samples   <- N
-    thisResult$n_remove    <- n_remove
-    thisResult$sample_rate <- sr
-
-    if (return_wave) {
-      # list-column so dplyr::bind_rows won't explode the waveform
-      thisResult$liftered_wave <- list(y)
-    }
-
-    result[[ch]] <- thisResult
+  
+  wave <- data$wave
+  if (!is.matrix(wave)) {
+    wave <- as.matrix(wave)
   }
-
-  # Combine channels into a single data.frame (2 rows for testClick)
-  dplyr::bind_rows(result)
+  
+  n_chan <- ncol(wave)
+  if (n_chan < 1) {
+    stop("data$wave has zero channels.")
+  }
+  if (chan < 1 || chan > n_chan) {
+    stop("Requested chan = ", chan,
+         " but data$wave has only ", n_chan, " channel(s).")
+  }
+  
+  # --- PAMpal requirement: one row per channel ---
+  # Make a data.frame with n_chan rows.
+  # We can include a simple index column; PAMpal will also add its own Channel info.
+  result <- data.frame(ChannelIdx = seq_len(n_chan))
+  
+  # If you don't want a dummy column, you can drop ChannelIdx later; it’s harmless.
+  
+  if (return_wave) {
+    # Preallocate list-column with NA for each channel
+    result$liftered_wave <- replicate(n_chan, NA, simplify = FALSE)
+    
+    # --- process ONLY the selected channel ---
+    x <- as.numeric(wave[, chan])
+    n <- length(x)
+    
+    # FFT-based cepstral high-pass liftering
+    spec    <- fft(x)
+    logSpec <- log(Mod(spec) + .Machine$double.eps)
+    cep     <- Re(fft(logSpec, inverse = TRUE)) / n
+    
+    # Zero out the first n_remove quefrency bins
+    if (n_remove > 0 && n_remove < length(cep)) {
+      cep[1:n_remove] <- 0
+    }
+    
+    logSpec_hp <- Re(fft(cep))
+    spec_hp    <- exp(logSpec_hp) * exp(1i * Arg(spec))
+    x_hp       <- Re(fft(spec_hp, inverse = TRUE)) / n
+    
+    # Store only for the selected channel row
+    result$liftered_wave[[chan]] <- x_hp
+  }
+  
+  return(result)
 }
+
 ```
 
 ## Generate New Acoustic Study
@@ -136,9 +113,9 @@ hpLifterClick <- function(
 pps <- addFunction(pps, hpLifterClick, module = "ClickDetector", verbose = TRUE)
 
 # Re-run processing (uses your existing DB + settings)
-study2 <- processPgDetections(pps)
+study <- processPgDetections(pps)
 
-lifters <- getClickData(study2)
+lifters <- getClickData(study)
 ```
 
 ## Plot Concatenated Spectrograms & Mean Spectra of Liftered Events
@@ -293,8 +270,10 @@ plotMeanClickSpectrum <- function(
 
 ```{r}
 
+sr    <- study[[1]]@settings$sr
 waves <- lifters$liftered_wave
-sr    <- lifters$sample_rate[1]
+waves <- waves[!is.na(waves)]
+
 
 plotClickSpectrogram(
   waves  = waves,
