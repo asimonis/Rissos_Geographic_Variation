@@ -20,7 +20,7 @@ libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purr","signal")
 ```{r}
 ###USER-DEFINED FIELDS####
 baseDir <- here('data')
-DriftID<-'ADRIFT_003'
+DriftID<-'ADRIFT_006'
 binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
 
 # this database should be the cleaned copy
@@ -141,78 +141,151 @@ study2 <- processPgDetections(pps)
 lifters <- getClickData(study2)
 ```
 
-## Plot Concatenated Spectrograms of Liftered Events
+## Plot Concatenated Spectrograms & Mean Spectra of Liftered Events
 
 ```{r}
 
 #Define Functions: create spectrogram for a single waveform, then concatenate into a matrix
-pplotClickSpectra <- function(
-  waves,
-  sr,
-  nfft = 512,
-  flim = NULL,                     # <---- NEW
-  main = "Click spectra by click number"
-) {
-  # ---- compute per-click spectra ----
-  clickSpectraMatrix <- function(waves, sr, nfft = 512) {
-    Ls <- vapply(waves, length, integer(1))
-    if (length(unique(Ls)) != 1) {
-      stop("All waveforms in 'waves' must have the same length.")
-    }
-    
-    n_clicks <- length(waves)
-    freqs <- seq(0, sr/2, length.out = nfft/2 + 1)
-    
-    click_spec <- function(x) {
-      if (length(x) < nfft) {
-        x <- c(x, rep(0, nfft - length(x)))
-      } else if (length(x) > nfft) {
-        x <- x[seq_len(nfft)]
-      }
-      X <- fft(x)
-      P <- (Mod(X)^2) / (nfft * sr)
-      P[1:(nfft/2 + 1)]
-    }
-    
-    spec_mat <- sapply(waves, click_spec)
-    spec_db <- 10 * log10(spec_mat + .Machine$double.eps)
-    
-    list(freqs = freqs, spec_db = spec_db)
+clickSpectraMatrix <- function(waves, sr, nfft = 512) {
+  if (!is.list(waves) || length(waves) == 0) {
+    stop("'waves' must be a non-empty list of numeric vectors.")
+  }
+  if (!all(vapply(waves, is.numeric, logical(1)))) {
+    stop("All elements of 'waves' must be numeric vectors.")
   }
   
+  Ls <- vapply(waves, length, integer(1))
+  if (length(unique(Ls)) != 1) {
+    stop("All waveforms in 'waves' must have the same length.")
+  }
+  
+  # one-sided frequency axis
+  freqs <- seq(0, sr/2, length.out = nfft/2 + 1)
+  
+  click_spec <- function(x) {
+    if (length(x) < nfft) {
+      x <- c(x, rep(0, nfft - length(x)))
+    } else if (length(x) > nfft) {
+      x <- x[seq_len(nfft)]
+    }
+    X <- fft(x)
+    P <- (Mod(X)^2) / (nfft * sr)   # power spectrum
+    P[1:(nfft/2 + 1)]
+  }
+  
+  spec_mat <- sapply(waves, click_spec)          # freq × clicks
+  spec_db  <- 10 * log10(spec_mat + .Machine$double.eps)
+  
+  list(freqs = freqs, spec_db = spec_db)        # freq × clicks
+}
+
+plotClickSpectrogram <- function(
+  waves,
+  sr,
+  nfft     = 512,
+  flim     = NULL,       # c(fmin, fmax) in Hz
+  log_freq = FALSE,
+  main     = "Click spectra by click number"
+) {
   cs <- clickSpectraMatrix(waves, sr, nfft)
   freqs   <- cs$freqs
-  spec_db <- cs$spec_db     # freq × clicks matrix
+  spec_db <- cs$spec_db   # freq × clicks
   
-  # ---- Apply frequency limits if provided ----
+  # apply frequency limits
   if (!is.null(flim)) {
-    if (length(flim) != 2) stop("flim must be a vector: c(fmin, fmax)")
-    
-    fmin <- flim[1]
-    fmax <- flim[2]
-    
-    keep <- which(freqs >= fmin & freqs <= fmax)
-    
-    # subset frequencies and spectrum
+    if (length(flim) != 2) stop("flim must be c(fmin, fmax)")
+    keep <- which(freqs >= flim[1] & freqs <= flim[2])
     freqs   <- freqs[keep]
     spec_db <- spec_db[keep, , drop = FALSE]
   }
   
   n_clicks <- ncol(spec_db)
   
-  # ---- Plot ----
-  image(
-    x = 1:n_clicks,
-    y = freqs,
-    z = t(spec_db),
-    xlab = "Click number",
-    ylab = "Frequency (Hz)",
-    main = main
-  )
+  if (!log_freq) {
+    # linear frequency axis
+    image(
+      x = 1:n_clicks,
+      y = freqs,
+      z = t(spec_db),          # clicks × freq for image()
+      xlab = "Click number",
+      ylab = "Frequency (Hz)",
+      main = main
+    )
+  } else {
+    # log-scaled frequency axis
+    plot(1,
+         type = "n",
+         xlim = c(1, n_clicks),
+         ylim = range(freqs),
+         log  = "y",
+         xlab = "Click number",
+         ylab = "Frequency (Hz)",
+         main = main)
+    
+    z <- t(spec_db)
+    z_norm <- (z - min(z, na.rm = TRUE)) /
+              (max(z, na.rm = TRUE) - min(z, na.rm = TRUE))
+    
+    rasterImage(
+      as.raster(z_norm),
+      xleft   = 1,
+      xright  = n_clicks,
+      ybottom = min(freqs),
+      ytop    = max(freqs)
+    )
+  }
+  
+  invisible(list(freqs = freqs, S_click_db = spec_db))
+}
+
+plotMeanClickSpectrum <- function(
+  waves,
+  sr,
+  nfft     = 512,
+  flim     = NULL,
+  log_freq = FALSE,
+  main     = "Mean spectrum across clicks"
+) {
+  cs <- clickSpectraMatrix(waves, sr, nfft)
+  freqs   <- cs$freqs
+  spec_db <- cs$spec_db   # freq × clicks
+  
+  # apply frequency limits
+  if (!is.null(flim)) {
+    if (length(flim) != 2) stop("flim must be c(fmin, fmax)")
+    keep <- which(freqs >= flim[1] & freqs <= flim[2])
+    freqs   <- freqs[keep]
+    spec_db <- spec_db[keep, , drop = FALSE]
+  }
+  
+  mean_spec_db <- rowMeans(spec_db, na.rm = TRUE)
+  
+   # Convert frequency to kHz for plotting
+  freqs_khz <- freqs / 1000
+  
+  # ---- PLOT (frequency in kHz) ----
+  if (!log_freq) {
+    plot(
+      freqs_khz, mean_spec_db,
+      type = "l",
+      xlab = "Frequency (kHz)",
+      ylab = "Mean spectrum (dB)",
+      main = main
+    )
+  } else {
+    plot(
+      freqs_khz, mean_spec_db,
+      type = "l",
+      log  = "x",
+      xlab = "Frequency (kHz)",
+      ylab = "Mean spectrum (dB)",
+      main = paste0(main, " (log freq)")
+    )
+  }
   
   invisible(list(
-    freqs    = freqs,
-    S_click  = spec_db
+    freqs_khz     = freqs_khz,
+    mean_spec_db  = mean_spec_db
   ))
 }
 
@@ -223,11 +296,19 @@ pplotClickSpectra <- function(
 waves <- lifters$liftered_wave
 sr    <- lifters$sample_rate[1]
 
-plotClickSpectra(
-  waves = waves,
-  sr    = sr,
-  nfft  = 512,
-  main  = "Liftered click spectra (by click number)",
-  flim = c(0, 100000)
+plotClickSpectrogram(
+  waves  = waves,
+  sr     = sr,
+  nfft   = 512,
+  flim   = c(0, 100000),   
+  log_freq = FALSE
+)
+
+plotMeanClickSpectrum(
+  waves  = waves,
+  sr     = sr,
+  nfft   = 512,
+  flim   = c(0, 100000),
+  log_freq =FALSE
 )
 ```
