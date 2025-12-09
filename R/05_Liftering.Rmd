@@ -20,7 +20,7 @@ libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate")
 ```{r}
 ###USER-DEFINED FIELDS####
 baseDir <- here('data')
-DriftID<-'ADRIFT_006'
+DriftID<-'ADRIFT_003'
 binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
 
 # this database should be the cleaned copy
@@ -46,63 +46,87 @@ hpLifterClick <- function(
   n_remove = 6,             # remove first n+1 quefrency bins incl. 0 (default 6)
   return_wave = TRUE        # store filtered waveform in a list-column
 ) {
-  # data$wave: matrix [samples x channels], data$sr: sample rate
-  W  <- data$wave
+  # List required packages (PAMpal pattern)
+  packageList <- c("dplyr")
+  for(p in packageList) {
+    if (!require(p, character.only = TRUE)) {
+      install.packages(p)
+      require(p, character.only = TRUE)
+    }
+  }
+
+  W  <- data$wave                 # matrix: samples x channels
   sr <- data$sr
   nC <- ncol(W)
 
-  out <- vector("list", nC)
+  # one entry per channel
+  result <- vector("list", nC)
 
   for (ch in seq_len(nC)) {
     x <- as.numeric(W[, ch])
     N <- length(x)
 
-    if (!length(x) || all(!is.finite(x))) {
-      out[[ch]] <- list(
-        liftered_wave = if (return_wave) list(NA_real_) else NULL,
-        rms_before = NA_real_,
-        rms_after  = NA_real_,
-        lifter_n   = n_remove,
-        sr         = sr,
-        channel    = ch
-      )
+    # storage for this channel – IMPORTANT:
+    # same names for every channel
+    thisResult <- list()
+
+    # Handle pathological cases safely (too short, all zeros, etc.)
+    if (N <= (n_remove + 1) || all(is.na(x)) || all(x == 0)) {
+      thisResult$lifter_ok       <- FALSE
+      thisResult$n_samples       <- N
+      thisResult$n_remove        <- n_remove
+      thisResult$sample_rate     <- sr
+      if (return_wave) {
+        # list-column; we can store NA instead of a waveform
+        thisResult$liftered_wave <- list(rep(NA_real_, N))
+      }
+      result[[ch]] <- thisResult
       next
     }
 
-    # FFT -> log magnitude -> real cepstrum
-    X    <- stats::fft(x)
-    mag  <- Mod(X)
-    phs  <- Arg(X)
-    logS <- log(pmax(mag, .Machine$double.eps))
-    cep  <- Re(stats::fft(logS, inverse = TRUE)) / N
+    ## ----- Cepstrum-based high-pass lifter -----
 
-    # High-pass lifter: zero 0..n_remove and their symmetric (wrapped) indices
-    k      <- 0:n_remove
-    idx_lo <- 1 + k
-    idx_hi <- N - k
-    cep[idx_lo] <- 0
-    cep[idx_hi] <- 0
+    # FFT of waveform
+    X <- fft(x)
 
-    # Rebuild log spectrum, magnitude, reapply original phase
-    logS_f  <- Re(stats::fft(cep))
-    mag_f   <- exp(logS_f)
-    X_f     <- mag_f * exp(1i * phs)
-    x_f     <- Re(stats::fft(X_f, inverse = TRUE)) / N
+    # log-magnitude spectrum (avoid log(0))
+    S <- log(Mod(X) + .Machine$double.eps)
 
-    out[[ch]] <- list(
-      liftered_wave = if (return_wave) list(x_f) else NULL,
-      rms_before = sqrt(mean(x^2)),
-      rms_after  = sqrt(mean(x_f^2)),
-      lifter_n   = n_remove,
-      sr         = sr,
-      channel    = ch
-    )
+    # real cepstrum (IFFT of log-mag spectrum)
+    c <- Re(fft(S, inverse = TRUE)) / N
+
+    # high-pass lifter: zero first (n_remove + 1) quefrency bins
+    c_hp <- c
+    c_hp[seq_len(min(n_remove + 1, N))] <- 0
+
+    # back to (log-magnitude) spectrum
+    S_hp <- fft(c_hp)
+    mag_hp <- exp(Re(S_hp))       # new magnitude spectrum
+
+    # preserve original phase
+    Y <- mag_hp * exp(1i * Arg(X))
+
+    # inverse FFT to time domain
+    y <- Re(fft(Y, inverse = TRUE)) / N
+
+    ## ----- Store outputs for this channel -----
+
+    thisResult$lifter_ok   <- TRUE
+    thisResult$n_samples   <- N
+    thisResult$n_remove    <- n_remove
+    thisResult$sample_rate <- sr
+
+    if (return_wave) {
+      # list-column so dplyr::bind_rows won't explode the waveform
+      thisResult$liftered_wave <- list(y)
+    }
+
+    result[[ch]] <- thisResult
   }
 
-  # return one row per channel (data.frame/tibble ok)
-  do.call(rbind.data.frame, lapply(out, as.data.frame))
+  # Combine channels into a single data.frame (2 rows for testClick)
+  dplyr::bind_rows(result)
 }
-
 ```
 
 ## Generate New Acoustic Study
@@ -114,15 +138,108 @@ pps <- addFunction(pps, hpLifterClick, module = "ClickDetector", verbose = TRUE)
 # Re-run processing (uses your existing DB + settings)
 study2 <- processPgDetections(pps)
 
-# Retrieve the outputs from this function for all clicks:
-lifters <- getDetectorData(study2, detector = "ClickDetector", fun = "hpLifterClick")
-
+lifters <- getClickData(study2)
 ```
 
 ## Plot Concatenated Spectrograms of Liftered Events
 
 ```{r}
-#Plot mean spectrum & concatenated spectrogram 
-calculateAverageSpectra(study2,flim=c(0,100000)) 
-beep()
+
+#Pull liftered waves from Acoustic Study
+#Transform them with FFT and make a spectrogram. 
+
+# #Plot mean spectrum & concatenated spectrogram 
+# calculateAverageSpectra(study2,flim=c(0,100000)) 
+# beep()
+
+library(dplyr)
+library(purrr)
+library(signal)
+
+
+#Define Functions: create spectrogram for a single waveform, then concatenate into a matrix
+pplotClickSpectra <- function(
+  waves,
+  sr,
+  nfft = 512,
+  flim = NULL,                     # <---- NEW
+  main = "Click spectra by click number"
+) {
+  # ---- compute per-click spectra ----
+  clickSpectraMatrix <- function(waves, sr, nfft = 512) {
+    Ls <- vapply(waves, length, integer(1))
+    if (length(unique(Ls)) != 1) {
+      stop("All waveforms in 'waves' must have the same length.")
+    }
+    
+    n_clicks <- length(waves)
+    freqs <- seq(0, sr/2, length.out = nfft/2 + 1)
+    
+    click_spec <- function(x) {
+      if (length(x) < nfft) {
+        x <- c(x, rep(0, nfft - length(x)))
+      } else if (length(x) > nfft) {
+        x <- x[seq_len(nfft)]
+      }
+      X <- fft(x)
+      P <- (Mod(X)^2) / (nfft * sr)
+      P[1:(nfft/2 + 1)]
+    }
+    
+    spec_mat <- sapply(waves, click_spec)
+    spec_db <- 10 * log10(spec_mat + .Machine$double.eps)
+    
+    list(freqs = freqs, spec_db = spec_db)
+  }
+  
+  cs <- clickSpectraMatrix(waves, sr, nfft)
+  freqs   <- cs$freqs
+  spec_db <- cs$spec_db     # freq × clicks matrix
+  
+  # ---- Apply frequency limits if provided ----
+  if (!is.null(flim)) {
+    if (length(flim) != 2) stop("flim must be a vector: c(fmin, fmax)")
+    
+    fmin <- flim[1]
+    fmax <- flim[2]
+    
+    keep <- which(freqs >= fmin & freqs <= fmax)
+    
+    # subset frequencies and spectrum
+    freqs   <- freqs[keep]
+    spec_db <- spec_db[keep, , drop = FALSE]
+  }
+  
+  n_clicks <- ncol(spec_db)
+  
+  # ---- Plot ----
+  image(
+    x = 1:n_clicks,
+    y = freqs,
+    z = t(spec_db),
+    xlab = "Click number",
+    ylab = "Frequency (Hz)",
+    main = main
+  )
+  
+  invisible(list(
+    freqs    = freqs,
+    S_click  = spec_db
+  ))
+}
+
+```
+
+```{r}
+
+waves <- lifters$liftered_wave
+sr    <- lifters$sample_rate[1]
+
+plotClickSpectra(
+  waves = waves,
+  sr    = sr,
+  nfft  = 512,
+  main  = "Liftered click spectra (by click number)",
+  flim = c(0, 100000)
+)
 ```
