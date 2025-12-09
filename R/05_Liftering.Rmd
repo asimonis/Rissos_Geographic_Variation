@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r, load packages, message=FALSE}
 library("easypackages") 
-libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate")
+libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purr","signal")
 ```
 
 ## Define PAMpal settings
@@ -144,18 +144,6 @@ lifters <- getClickData(study2)
 ## Plot Concatenated Spectrograms of Liftered Events
 
 ```{r}
-
-#Pull liftered waves from Acoustic Study
-#Transform them with FFT and make a spectrogram. 
-
-# #Plot mean spectrum & concatenated spectrogram 
-# calculateAverageSpectra(study2,flim=c(0,100000)) 
-# beep()
-
-library(dplyr)
-library(purrr)
-library(signal)
-
 
 #Define Functions: create spectrogram for a single waveform, then concatenate into a matrix
 pplotClickSpectra <- function(
