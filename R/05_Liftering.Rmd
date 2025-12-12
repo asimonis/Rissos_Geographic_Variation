@@ -12,29 +12,10 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r, load packages, message=FALSE}
 library("easypackages") 
-libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purr","signal")
+libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purr","signal","fs","stringr")
 ```
 
-## Define PAMpal settings
-
-```{r}
-###USER-DEFINED FIELDS####
-baseDir <- here('data')
-DriftID<-'ADRIFT_006'
-binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
-
-# this database should be the cleaned copy
-db <- paste0(baseDir,'/Databases/',DriftID,' - Clean.sqlite3')
-
-pps <- PAMpalSettings(db=db, 
-                      binaries = binFolder,
-                      sr_hz='auto', 
-                      winLen_sec=.0025, 
-                      filterfrom_khz=10, 
-                      filterto_khz=80)
-```
-
-## Define custom liftering function
+## Define functions for liftering and plotting spectra
 
 Follow general approach of Soldevilla et al 2017. Apply high-pass lifter to remove first 6 quefrencies.
 
@@ -103,24 +84,6 @@ hpLifterClick <- function(data,
   
   return(result)
 }
-
-```
-
-## Generate New Acoustic Study
-
-```{r}
-#Add liftering function
-pps <- addFunction(pps, hpLifterClick, module = "ClickDetector", verbose = TRUE)
-
-# Re-run processing (uses your existing DB + settings)
-study <- processPgDetections(pps)
-
-lifters <- getClickData(study)
-```
-
-## Plot Concatenated Spectrograms & Mean Spectra of Liftered Events
-
-```{r}
 
 #Define Functions: create spectrogram for a single waveform, then concatenate into a matrix
 clickSpectraMatrix <- function(waves, sr, nfft = 512) {
@@ -266,28 +229,92 @@ plotMeanClickSpectrum <- function(
   ))
 }
 
+
 ```
 
+## Define PAMpal settings
+
 ```{r}
+###USER-DEFINED FIELDS####
+baseDir <- here('data')
+DriftID<-'ADRIFT_067'
+binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
+
+# this database should be the cleaned copy
+db <- paste0(baseDir,'/Databases/',DriftID,' - Clean.sqlite3')
+
+pps <- PAMpalSettings(db=db, 
+                      binaries = binFolder,
+                      sr_hz='auto', 
+                      winLen_sec=.0025, 
+                      filterfrom_khz=10, 
+                      filterto_khz=80)
+```
+
+## Generate New Acoustic Study
+
+```{r}
+#Add liftering function
+pps <- addFunction(pps, hpLifterClick, module = "ClickDetector")
+
+# Re-run processing (uses your existing DB + settings)
+study <- processPgDetections(pps)
+
+lifters <- getClickData(study)
+```
+
+## Plot Concatenated Spectrograms & Mean Spectra of Liftered Events
+
+```{r}
+out_root <-  file.path(baseDir,'LifteredSpectra')
+drift_dir <- fs::path(out_root, DriftID)
+dir_create(drift_dir)
+
+#Most studies only have 1 event. Change this for events with multiple studies (will need to define 'waves' for each event)
+event_ids<-1
 
 sr    <- study[[1]]@settings$sr
 waves <- lifters$liftered_wave
 waves <- waves[!is.na(waves)]
 
+#Pre-create all event folders
+event_names <- paste0(DriftID, "_Event_", str_pad(event_ids, 3, pad = "0"))
+# event_dirs  <- fs::path(drift_dir, event_names)
+# fs::dir_create(event_dirs)
 
-plotClickSpectrogram(
+#Loop: one call per event -> two plots auto-saved -> rename
+for (k in seq_along(event_ids)) {
+  i      <- event_ids[k]
+  # ev_dir <- event_dirs[k]
+  ev_tag <- event_names[k]
+
+  #Plot and save images
+  pattern <- fs::path(drift_dir, paste0(ev_tag,"_ConcatSpectrogram.png"))
+  png(filename = pattern, width = 1600, height = 1000, res = 150, bg = "white")
+  
+  plotClickSpectrogram(
   waves  = waves,
   sr     = sr,
   nfft   = 512,
   flim   = c(0, 100000),   
-  log_freq = FALSE
+  log_freq = FALSE,
+  main     = paste0('Liftered spectra:', ev_tag)
 )
+  dev.off()
 
-plotMeanClickSpectrum(
+ pattern <- fs::path(drift_dir, paste0(ev_tag, "_MeanSpectrum.png"))
+  png(filename = pattern, width = 1600, height = 1000, res = 150, bg = "white")
+  plotMeanClickSpectrum(
   waves  = waves,
   sr     = sr,
   nfft   = 512,
   flim   = c(0, 100000),
-  log_freq =FALSE
+  log_freq =FALSE, 
+  main     = paste0('Mean spectrum after liftering: ',ev_tag)
 )
+   dev.off()
+  
+}
+
+
 ```
