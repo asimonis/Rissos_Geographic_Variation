@@ -237,7 +237,7 @@ plotMeanClickSpectrum <- function(
 ```{r}
 ###USER-DEFINED FIELDS####
 baseDir <- here('data')
-DriftID<-'ADRIFT_067'
+DriftID<-'CCES_007'
 binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
 
 # this database should be the cleaned copy
@@ -272,6 +272,8 @@ dir_create(drift_dir)
 
 #Most studies only have 1 event. Change this for events with multiple studies (will need to define 'waves' for each event)
 event_ids<-1
+lifters<-lifters %>% 
+  dplyr::filter(eventId==(unique(lifters$eventId)[[1]])) #choose 1st event (need to change for multi-event studies)
 
 sr    <- study[[1]]@settings$sr
 waves <- lifters$liftered_wave
