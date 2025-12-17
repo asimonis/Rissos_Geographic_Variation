@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r, load packages, message=FALSE}
 library("easypackages") 
-libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purr","signal","fs","stringr")
+libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purrr","signal","fs","stringr","tidyr","ggplot2")
 ```
 
 ## Define functions for liftering and plotting spectra
@@ -20,216 +20,7 @@ libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purr","signal",
 Follow general approach of Soldevilla et al 2017. Apply high-pass lifter to remove first 6 quefrencies.
 
 ```{r}
-# High-pass liftering for click waveforms (magnitude-cepstrum HP lifter)
-hpLifterClick <- function(data,
-                          calibration = NULL,
-                          n_remove    = 6,
-                          return_wave = TRUE,
-                          chan        = 1,
-                          ...) {
-  # data$wave: matrix, rows = samples, cols = channels
-  # data$sr  : sample rate (Hz)
-  
-  # --- basic checks & setup ---
-  if (is.null(data$wave)) {
-    stop("data$wave is NULL – hpLifterClick expects data$wave to be a matrix.")
-  }
-  
-  wave <- data$wave
-  if (!is.matrix(wave)) {
-    wave <- as.matrix(wave)
-  }
-  
-  n_chan <- ncol(wave)
-  if (n_chan < 1) {
-    stop("data$wave has zero channels.")
-  }
-  if (chan < 1 || chan > n_chan) {
-    stop("Requested chan = ", chan,
-         " but data$wave has only ", n_chan, " channel(s).")
-  }
-  
-  # --- PAMpal requirement: one row per channel ---
-  # Make a data.frame with n_chan rows.
-  # We can include a simple index column; PAMpal will also add its own Channel info.
-  result <- data.frame(ChannelIdx = seq_len(n_chan))
-  
-  # If you don't want a dummy column, you can drop ChannelIdx later; it’s harmless.
-  
-  if (return_wave) {
-    # Preallocate list-column with NA for each channel
-    result$liftered_wave <- replicate(n_chan, NA, simplify = FALSE)
-    
-    # --- process ONLY the selected channel ---
-    x <- as.numeric(wave[, chan])
-    n <- length(x)
-    
-    # FFT-based cepstral high-pass liftering
-    spec    <- fft(x)
-    logSpec <- log(Mod(spec) + .Machine$double.eps)
-    cep     <- Re(fft(logSpec, inverse = TRUE)) / n
-    
-    # Zero out the first n_remove quefrency bins
-    if (n_remove > 0 && n_remove < length(cep)) {
-      cep[1:n_remove] <- 0
-    }
-    
-    logSpec_hp <- Re(fft(cep))
-    spec_hp    <- exp(logSpec_hp) * exp(1i * Arg(spec))
-    x_hp       <- Re(fft(spec_hp, inverse = TRUE)) / n
-    
-    # Store only for the selected channel row
-    result$liftered_wave[[chan]] <- x_hp
-  }
-  
-  return(result)
-}
-
-#Define Functions: create spectrogram for a single waveform, then concatenate into a matrix
-clickSpectraMatrix <- function(waves, sr, nfft = 512) {
-  if (!is.list(waves) || length(waves) == 0) {
-    stop("'waves' must be a non-empty list of numeric vectors.")
-  }
-  if (!all(vapply(waves, is.numeric, logical(1)))) {
-    stop("All elements of 'waves' must be numeric vectors.")
-  }
-  
-  Ls <- vapply(waves, length, integer(1))
-  if (length(unique(Ls)) != 1) {
-    stop("All waveforms in 'waves' must have the same length.")
-  }
-  
-  # one-sided frequency axis
-  freqs <- seq(0, sr/2, length.out = nfft/2 + 1)
-  
-  click_spec <- function(x) {
-    if (length(x) < nfft) {
-      x <- c(x, rep(0, nfft - length(x)))
-    } else if (length(x) > nfft) {
-      x <- x[seq_len(nfft)]
-    }
-    X <- fft(x)
-    P <- (Mod(X)^2) / (nfft * sr)   # power spectrum
-    P[1:(nfft/2 + 1)]
-  }
-  
-  spec_mat <- sapply(waves, click_spec)          # freq × clicks
-  spec_db  <- 10 * log10(spec_mat + .Machine$double.eps)
-  
-  list(freqs = freqs, spec_db = spec_db)        # freq × clicks
-}
-
-plotClickSpectrogram <- function(
-  waves,
-  sr,
-  nfft     = 512,
-  flim     = NULL,       # c(fmin, fmax) in Hz
-  log_freq = FALSE,
-  main     = "Click spectra by click number"
-) {
-  cs <- clickSpectraMatrix(waves, sr, nfft)
-  freqs   <- cs$freqs
-  spec_db <- cs$spec_db   # freq × clicks
-  
-  # apply frequency limits
-  if (!is.null(flim)) {
-    if (length(flim) != 2) stop("flim must be c(fmin, fmax)")
-    keep <- which(freqs >= flim[1] & freqs <= flim[2])
-    freqs   <- freqs[keep]
-    spec_db <- spec_db[keep, , drop = FALSE]
-  }
-  
-  n_clicks <- ncol(spec_db)
-  
-  if (!log_freq) {
-    # linear frequency axis
-    image(
-      x = 1:n_clicks,
-      y = freqs,
-      z = t(spec_db),          # clicks × freq for image()
-      xlab = "Click number",
-      ylab = "Frequency (Hz)",
-      main = main
-    )
-  } else {
-    # log-scaled frequency axis
-    plot(1,
-         type = "n",
-         xlim = c(1, n_clicks),
-         ylim = range(freqs),
-         log  = "y",
-         xlab = "Click number",
-         ylab = "Frequency (Hz)",
-         main = main)
-    
-    z <- t(spec_db)
-    z_norm <- (z - min(z, na.rm = TRUE)) /
-              (max(z, na.rm = TRUE) - min(z, na.rm = TRUE))
-    
-    rasterImage(
-      as.raster(z_norm),
-      xleft   = 1,
-      xright  = n_clicks,
-      ybottom = min(freqs),
-      ytop    = max(freqs)
-    )
-  }
-  
-  invisible(list(freqs = freqs, S_click_db = spec_db))
-}
-
-plotMeanClickSpectrum <- function(
-  waves,
-  sr,
-  nfft     = 512,
-  flim     = NULL,
-  log_freq = FALSE,
-  main     = "Mean spectrum across clicks"
-) {
-  cs <- clickSpectraMatrix(waves, sr, nfft)
-  freqs   <- cs$freqs
-  spec_db <- cs$spec_db   # freq × clicks
-  
-  # apply frequency limits
-  if (!is.null(flim)) {
-    if (length(flim) != 2) stop("flim must be c(fmin, fmax)")
-    keep <- which(freqs >= flim[1] & freqs <= flim[2])
-    freqs   <- freqs[keep]
-    spec_db <- spec_db[keep, , drop = FALSE]
-  }
-  
-  mean_spec_db <- rowMeans(spec_db, na.rm = TRUE)
-  
-   # Convert frequency to kHz for plotting
-  freqs_khz <- freqs / 1000
-  
-  # ---- PLOT (frequency in kHz) ----
-  if (!log_freq) {
-    plot(
-      freqs_khz, mean_spec_db,
-      type = "l",
-      xlab = "Frequency (kHz)",
-      ylab = "Mean spectrum (dB)",
-      main = main
-    )
-  } else {
-    plot(
-      freqs_khz, mean_spec_db,
-      type = "l",
-      log  = "x",
-      xlab = "Frequency (kHz)",
-      ylab = "Mean spectrum (dB)",
-      main = paste0(main, " (log freq)")
-    )
-  }
-  
-  invisible(list(
-    freqs_khz     = freqs_khz,
-    mean_spec_db  = mean_spec_db
-  ))
-}
-
-
+source(here('R','lifteredClickCalcs.R'))
 ```
 
 ## Define PAMpal settings
@@ -237,7 +28,7 @@ plotMeanClickSpectrum <- function(
 ```{r}
 ###USER-DEFINED FIELDS####
 baseDir <- here('data')
-DriftID<-'CCES_007'
+DriftID<-'ADRIFT_033'
 binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
 
 # this database should be the cleaned copy
@@ -255,7 +46,15 @@ pps <- PAMpalSettings(db=db,
 
 ```{r}
 #Add liftering function
-pps <- addFunction(pps, hpLifterClick, module = "ClickDetector")
+pps <- addFunction(pps, lifteredClickCalcs, 
+                   module = "ClickDetector", 
+                   default = TRUE, # don't prompt for anything
+                   sr_hz         = "auto",
+                   calibration   = NULL,
+                   filterfrom_khz = 10,      
+                   filterto_khz   = 80,    
+                   winLen_sec     = 0.0025) 
+
 
 # Re-run processing (uses your existing DB + settings)
 study <- processPgDetections(pps)
@@ -319,4 +118,48 @@ for (k in seq_along(event_ids)) {
 }
 
 
+```
+
+## Plot parameter pairs to investigate impact of liftering
+
+```{r}
+
+# identify liftered parameters
+lifter_cols <- grep("^liftered_", names(lifters), value = TRUE)
+
+# corresponding original names
+orig_cols <- sub("^liftered_", "", lifter_cols)
+
+pairs <- data.frame(
+  original = orig_cols,
+  liftered = lifter_cols
+)
+pairs
+
+#Reshape to long format for ggplot
+data_long <- pairs %>%
+  # pivot each pair into long format and bind them together
+  purrr::pmap_dfr(function(original, liftered) {
+    lifters %>%
+      select(all_of(c(original, liftered))) %>%
+      pivot_longer(
+        cols = everything(),
+        names_to = "parameter",
+        values_to = "value"
+      ) %>%
+      mutate(pair = original,
+             type = ifelse(parameter == original, "original", "liftered"))
+  })
+
+#Plot
+ggplot(data_long, aes(x = type, y = value, fill = type)) +
+  geom_boxplot() +
+  facet_wrap(~ pair, scales = "free_y") +
+  labs(
+    title = "Effect of Liftering on Click Parameters",
+    x = "",
+    y = "Value"
+  ) +
+  scale_fill_manual(values = c("original" = "gray70", "liftered" = "steelblue")) +
+  theme_bw() 
 ```
