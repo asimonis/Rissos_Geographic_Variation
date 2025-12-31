@@ -1,0 +1,79 @@
+---
+title: "TukeySmoothing"
+author: "Anne Simonis"
+date: "2025-12-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Start by loading the required packages
+
+```{r, load packages, message=FALSE}
+library("easypackages") 
+libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purrr","signal","fs","stringr","tidyr","ggplot2")
+```
+
+## Load required packages
+
+```{r}
+
+source(here('R',"TukeySmoothing.R"))
+
+###USER-DEFINED FIELDS####
+baseDir <- here('data')
+DriftID<-'ADRIFT_033'
+binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
+
+# this database should be the cleaned copy
+db <- paste0(baseDir,'/Databases/',DriftID,' - Clean.sqlite3')
+
+pps <- PAMpalSettings(db=db, 
+                      binaries = binFolder,
+                      sr_hz='auto', 
+                      winLen_sec=.0025, 
+                      filterfrom_khz=10, 
+                      filterto_khz=80)
+
+study <- processPgDetections(pps)
+
+study<-dplyr::filter(study,Channel==1)       
+ 
+#Calculate average spectrum with and without Tukey smoothing      
+smooth <- calculateAverageSpectra_tukey(
+  study,
+  evNum = 1,
+  tukeyMedian = 3,
+  tukeyHanningSize = 3,plot=FALSE
+)
+
+raw <- calculateAverageSpectra(
+  study,
+  evNum = 1,plot=FALSE
+)
+
+ylim <- range(c(raw$avgSpec, smooth$avgSpec), na.rm = TRUE)
+
+```
+
+## 
+
+### Save images in "Smooth Options" folder
+
+```{r}
+out_root <-  file.path(baseDir,'Smooth Options')
+drift_dir <- fs::path(out_root, DriftID)
+dir_create(drift_dir)
+
+event_ids<-1
+event_name <- paste0(DriftID, "_Event_", str_pad(event_ids, 3, pad = "0"))
+
+ #Plot and save images
+  pattern <- fs::path(drift_dir, paste0(event_name,"_Smooths.png"))
+  png(filename = pattern, width = 1600, height = 1000, res = 150, bg = "white")
+  
+plotCompareSpectra(raw, smooth, main = paste0(event_name,": Raw vs Tukey"))
+  dev.off()
+```
