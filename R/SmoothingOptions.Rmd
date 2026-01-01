@@ -41,24 +41,29 @@ study <- processPgDetections(pps)
 
 study<-dplyr::filter(study,Channel==1)       
  
-#Calculate average spectrum with and without Tukey smoothing      
+#Calculate average spectrum with and without Tukey smoothing
+#Use 1024 window length for 375 Hz frequency resolution (Soldevilla used 400 Hz) 
 smooth <- calculateAverageSpectra_tukey(
   study,
   evNum = 1,
-  tukeyMedian = 3,
-  tukeyHanningSize = 3,plot=FALSE
+  channel=1,
+  tukeyMedian = 5,
+  tukeyHanningSize = 5,
+  plot=FALSE,
+  wl=1024
 )
 
 raw <- calculateAverageSpectra(
   study,
-  evNum = 1,plot=FALSE
+  evNum = 1,
+  channel=1,
+  plot=FALSE,
+  wl=1024
 )
 
 ylim <- range(c(raw$avgSpec, smooth$avgSpec), na.rm = TRUE)
 
 ```
-
-## 
 
 ### Save images in "Smooth Options" folder
 
@@ -76,4 +81,17 @@ event_name <- paste0(DriftID, "_Event_", str_pad(event_ids, 3, pad = "0"))
   
 plotCompareSpectra(raw, smooth, main = paste0(event_name,": Raw vs Tukey"))
   dev.off()
+```
+
+### Plot click spectra showing raw signal, with 5-point Hann smooth and Tukey double smooth  
+
+```{r}
+
+#Plot one click
+plot(raw$freq,raw$allSpec[,1],type='l',xlab="Frequency (kHz)",ylab="Level(dB)",xlim=c(19000,50000))
+lines(smooth$freq, smooth$allSpec[,1], lwd = 2)
+legend("bottomright", legend = c("Raw", "Tukey"), lwd = c(1, 2), bty = "n")
+
+#Plot a single click by UID, then step through clicks interactively (press Enter to advance)
+browse_clicks(raw, tukeyMedian = 5, tukeyHanningSize = 5, fmin_khz = 19, fmax_khz = 50)
 ```

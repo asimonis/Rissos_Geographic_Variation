@@ -301,3 +301,96 @@ plotCompareSpectra <- function(raw, smooth,
 }
 
 
+
+#5 point Hann smoother
+hann5 <- function(x) {
+  w <- c(0.25, 0.5, 1, 0.5, 0.25)
+  w <- w / sum(w)
+  as.numeric(stats::filter(x, w, sides = 2))
+}
+
+#Plot a single click by UID, then step through clicks interactively (press Enter to advance)
+plot_one_click <- function(raw, tukey, uid,
+                           fmin_khz = 19, fmax_khz = 50,
+                           tukeyMedian = 3, tukeyHanningSize = 5) {
+  
+  i_raw <- match(uid, raw$UID)
+  i_tuk <- match(uid, tukey$UID)
+  
+  keep <- raw$freq >= fmin_khz*1000 & raw$freq <= fmax_khz*1000
+  x_khz <- raw$freq[keep] / 1000
+  
+  y_raw <- raw$allSpec[keep, i_raw]
+  y_tuk <- tukey$allSpec[keep, i_tuk]
+  y_h5  <- hann5(y_raw)
+  
+  ylim <- range(c(y_raw, y_tuk, y_h5), na.rm = TRUE)
+  
+  plot(x_khz, y_raw, type="l", ylim=ylim,
+       xlab="Frequency (kHz)", ylab="Level (dB)",
+       main=paste("UID:", uid))
+  
+  lines(x_khz, y_tuk, lwd=2)
+  lines(x_khz, y_h5, lty=2, lwd=2)
+  
+  legend("topright",
+         legend=c("Raw", "Tukey (double)", "Hann-5"),
+         lwd=c(1,2,2), lty=c(1,1,2), bty="n")
+}
+
+
+
+browse_clicks <- function(raw,
+                          uids = raw$UID,
+                          fmin_khz = 19, fmax_khz = 50,
+                          tukeyMedian = 3L,
+                          tukeyHanningSize = 5L) {
+  
+  # basic checks
+  if (is.null(raw$freq) || is.null(raw$allSpec) || is.null(raw$UID))
+    stop("raw must contain $freq, $allSpec, and $UID")
+  
+  if (!exists("spNLFilter", mode = "function"))
+    stop("spNLFilter() not found. Source/define it first.")
+  
+  if (!exists("hann5", mode = "function"))
+    stop("hann5() not found. Define it first.")
+  
+  # keep only valid uids
+  uids <- intersect(uids, raw$UID)
+  if (length(uids) == 0) stop("No UIDs to browse.")
+  
+  # frequency band
+  keep_f <- raw$freq >= fmin_khz * 1000 & raw$freq <= fmax_khz * 1000
+  if (!any(keep_f)) stop("No frequency bins in the requested range.")
+  x_khz <- raw$freq[keep_f] / 1000
+  
+  for (uid in uids) {
+    i <- match(uid, raw$UID)
+    
+    y_raw <- raw$allSpec[keep_f, i]
+    y_tuk <- spNLFilter(y_raw, "Tukey", tukeyMedian, tukeyHanningSize)
+    y_h5  <- hann5(y_raw)
+    
+    ylim <- range(c(y_raw, y_tuk, y_h5), na.rm = TRUE)
+    
+    graphics::plot(x_khz, y_raw, type = "l", ylim = ylim,
+                   xlab = "Frequency (kHz)", ylab = "Level (dB)",
+                   main = paste("UID:", uid))
+    
+    graphics::lines(x_khz, y_tuk, lwd = 2, lty = 1)
+    graphics::lines(x_khz, y_h5,  lwd = 2, lty = 2)
+    
+    graphics::legend("topright",
+                     legend = c("Raw", "Tukey (double)", "Hann-5"),
+                     lty = c(1, 1, 2),
+                     lwd = c(1, 2, 2),
+                     bty = "n")
+    
+    ans <- readline("Enter = next, q = quit: ")
+    if (tolower(ans) == "q") break
+  }
+  
+  invisible(TRUE)
+}
+
