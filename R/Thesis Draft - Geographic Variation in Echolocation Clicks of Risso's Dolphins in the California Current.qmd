@@ -1,5 +1,5 @@
 ---
-title: "Geographic Variation in Echolocation Clicks of Risso's Dolphins in the California Current"
+title: "Geographic Variation in Echolocation Clicks of Risso's Dolphins (Grampus grisues) in the California Current"
 format: 
   pdf:
     toc: false
@@ -12,28 +12,78 @@ editor: visual
 
 ## **Authors**
 
-Moseley, Sarah MS.; Simonis, Anne E., Hines, Ellen; Roch, Marie
+Sarah M.S. Moseley, Anne Simonis, Ellen Hines, Marie A. Roch, Shannon Rankin
 
 # Abstract
+
+The following is the abstract used for submission to the ASA conference
+
+Risso’s dolphins (*Grampus griseus*) produce broadband echolocation clicks that vary across regions, offering insight into population structure and habitat use. Two stocks are recognized in U.S. Pacific waters: the California–Oregon–Washington stock and the Hawaiian stock, but these designations may overlook finer-scale structure within the California Current Ecosystem (CCE). Building on evidence of geographic variation in Risso’s dolphin echolocation click types across the U.S. East Coast, Gulf of Mexico, Southern California Bight, and Hawaiian Islands, spectral peak and notch frequencies were measured from Risso’s dolphin echolocation clicks during three NOAA surveys between 2016 and 2023. Acoustic recordings were collected with drifting buoys, allowing broad coverage of the entire CCE region along the U.S. West Coast. Clustering of spectral features highlighted several different click types. We compared spatio-temporal variation in Risso’s click types across Oregon, Northern California, and Central California, including seasonal and diel variation. These results provide the first comprehensive assessment of Risso’s dolphin click characteristics across the CCE and enable comparison with other U.S. regions where click-type divergence has been observed. Fine-scale spatial, seasonal, and diel acoustic patterns can inform population assessment, ecological understanding, and ecosystem-based management.
+
+# I. Introduction
+
+PAM (specifically drifting acoustic recorders - benefits)
+
+Use of acoustic variation in possible determination of population divergence
+
+Where does click variation come from? Morphological differences is the most likely hypothesis
+
+Introduction of specifics about Risso's (distribution, diet, endangered status)
+
+Introduction of pre-established geographic variation in Soldevilla et al. 2017
+
+Why do we care about population structure specifically in the CCE? Two distinct stocks may overlook fine-scale population structure, anthropogentic impact (proposed off-shore wind energy ares)
+
+"This study..." (first comprehensive comprehensive assessment of Risso’s dolphin click characteristics across the CCE and enable comparison with other U.S. regions where click-type divergence has been observed. Fine-scale spatial, seasonal, and diel acoustic patterns can inform population assessment, ecological understanding, and ecosystem-based management.)
+
+"First... Then... Finally" (Soldevilla et al. 2017: click spectra are evaluated, k-means clustering, mean spectral peak and notch frequencies quantified for each encounter, regional variability)
+
+# II. Materials and Methods
+
+## A. Field Sites and Acoustic Survey Design
+
+Recordings of Risso's dolphins were collected via floating passive acoustic monitoring recorders deployed throughout the California Current Ecosystem (CCE) during three NOAA surveys; Passive Acoustic Survey of Cetaceans Abundance Levels (PASCAL-2016), California Current Ecosystem Survey (CCES-2018), and Adrift in the California Current (ADRIFT-2020-2023).
+
+## B. Signal Processing and Click Feature Extraction
+
+MATLAB click detectors (specific parameters?) creating databases and binaries
+
+Generation of concatenated spectrograms and spectra via R
+
+Visual confirmation of single-species events based upon generated spectrograms and cross comparison between events with Risso's detected and other specie encounters. Removal of any events that overlapped with other species within 20 minutes before and after the Risso's event.
+
+Copy of each usable database created ("-clean")
+
+Manual click cleaning removing clicks that were not Risso's
+
+Regeneration of concatenated spectrograms and spectra via R with the newly cleaned databases
+
+Liftering (?)
+
+## C. Spatial Patterns in Click Feature Distribution
+
+### *1. Prevalence of Spectral Banding*
+
+Events that did not display spectral banding were removed
+
+Events with less than \_\_\_ clicks exhibiting spectral banding were removed from further analysis
+
+### *2. Spectral Feature Clustering and Geographic Variation*
+
+### *3. Testing Geographic Structure in Echolocation Click Types Against Pre-existing Regional Variation*
+
+# III. Results
+
+## A. Prevalence of Spectral Banding
+
+## B. Spectral Feature Clustering and Geographic Variation
+
+## C. Testing Geographic Structure in Echolocation Click Types Against Pre-existing Regional Variation
+
+# IV. Discussion
+
+Soldevilla et al. 2017 used the following sections: Species Identification, Geographic Variation, Within-encounter variability, Geographical variation and seasonal movements, Automated extraction and classification)
+
+# V. Conclusions
 
 # Acknowledgements
-
-# Introduction
-
-# Abstract
-
-## Goal of this study
-
-# Methods
-
-## Data Collection
-
-## Data Analysis
-
-### Detection
-
-### Statistical Analysis
-
-# Results
-
-# Discussion
