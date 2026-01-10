@@ -27,7 +27,7 @@ source(here('R','lifteredClickCalcs.R'))
 
 ```{r}
 ###USER-DEFINED FIELDS####
-baseDir <- here('data')
+baseDir <- 'E:/Analysis/'
 DriftID<-'ADRIFT_033'
 binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
 

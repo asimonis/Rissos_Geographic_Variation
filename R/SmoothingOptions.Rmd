@@ -23,7 +23,7 @@ libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purrr","signal"
 source(here('R',"TukeySmoothing.R"))
 
 ###USER-DEFINED FIELDS####
-baseDir <- here('data')
+baseDir <- 'E:/Analysis/'
 DriftID<-'ADRIFT_033'
 binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
 
@@ -92,6 +92,6 @@ plot(raw$freq,raw$allSpec[,1],type='l',xlab="Frequency (kHz)",ylab="Level(dB)",x
 lines(smooth$freq, smooth$allSpec[,1], lwd = 2)
 legend("bottomright", legend = c("Raw", "Tukey"), lwd = c(1, 2), bty = "n")
 
-#Plot a single click by UID, then step through clicks interactively (press Enter to advance)
+#Plot a single click by UID, then step through clicks interactively (press Enter to advance)next
 browse_clicks(raw, tukeyMedian = 5, tukeyHanningSize = 5, fmin_khz = 19, fmax_khz = 50)
 ```

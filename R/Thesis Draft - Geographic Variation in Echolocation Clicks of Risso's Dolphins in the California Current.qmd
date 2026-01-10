@@ -60,6 +60,8 @@ Regeneration of concatenated spectrograms and spectra via R with the newly clean
 
 Liftering (?)
 
+Smoothing (options Tukey and Hanning)
+
 ## C. Spatial Patterns in Click Feature Distribution
 
 ### *1. Prevalence of Spectral Banding*
