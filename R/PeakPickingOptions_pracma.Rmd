@@ -65,24 +65,6 @@ ylim <- range(c(raw$avgSpec, smooth$avgSpec), na.rm = TRUE)
 
 ```
 
-### Save images in "Smooth Options" folder
-
-```{r}
-out_root <-  file.path(baseDir,'Smooth Options')
-drift_dir <- fs::path(out_root, DriftID)
-dir_create(drift_dir)
-
-event_ids<-1
-event_name <- paste0(DriftID, "_Event_", str_pad(event_ids, 3, pad = "0"))
-
- #Plot and save images
-  pattern <- fs::path(drift_dir, paste0(event_name,"_Smooths.png"))
-  png(filename = pattern, width = 1600, height = 1000, res = 150, bg = "white")
-  
-plotCompareSpectra(raw, smooth, main = paste0(event_name,": Raw vs Tukey"))
-  dev.off()
-```
-
 ### Plot click spectra showing raw signal, with 5-point Hann smooth and Tukey double smooth  
 
 ```{r}
@@ -141,17 +123,17 @@ y_band <- y[band]
 #Frequency resolution of the spectrum (kHz per FFT bin)
 freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
 
-#Minimum allowed separation between peaks, in kHz
-min_peak_separation_khz <- 0.6
+#Minimum allowed separation between peaks, in kHz - Original output used 0.6 value
+min_peak_separation_khz <- 0.3
 
 # Convert separation from kHz to number of frequency bins
 min_peak_separation_bins <- max(
   1, round(min_peak_separation_khz / freq_resolution_khz)
 )
 
-#Minimum peak height threshold (quantile-based)
+#Minimum peak height threshold (quantile-based) - Original output used 0.85 value
 min_peak_height_db <- as.numeric(
-  quantile(y_band, probs = 0.85, na.rm = TRUE)
+  quantile(y_band, probs = 0.10, na.rm = TRUE)
 )
 
 #Find peaks
@@ -241,7 +223,7 @@ y_raw   <- raw$allSpec[, click_i]
 y_tukey <- smooth$allSpec[, click_i]
 y_hann5 <- hann5_smooth(y_raw)
 
-#First spectrum to test with pracma: Tukey
+#Set Tukey
 y <- y_tukey
 
 #Banding restriction (kHz)
