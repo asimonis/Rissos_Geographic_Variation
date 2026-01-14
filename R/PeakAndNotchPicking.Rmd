@@ -1,0 +1,755 @@
+---
+title: "NotchPickingOptions"
+author: "Sarah Shiers"
+date: "2026-01-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Start by loading the required packages
+
+```{r, load packages, message=FALSE}
+library("easypackages") 
+libraries("PAMpal","PAMmisc","dplyr","here","beepr","lubridate","purrr","signal","fs","stringr","tidyr","ggplot2")
+```
+
+## Load required packages
+
+```{r}
+
+source(here('R',"TukeySmoothing.R"))
+
+###USER-DEFINED FIELDS####
+baseDir <- 'E:/Analysis/'
+DriftID<-'ADRIFT_033'
+binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
+
+# this database should be the cleaned copy
+db <- paste0(baseDir,'/Databases/',DriftID,' - Clean.sqlite3')
+
+pps <- PAMpalSettings(db=db, 
+                      binaries = binFolder,
+                      sr_hz='auto', 
+                      winLen_sec=.0025, 
+                      filterfrom_khz=10, 
+                      filterto_khz=80)
+
+study <- processPgDetections(pps)
+
+study<-dplyr::filter(study,Channel==1)       
+ 
+#Calculate average spectrum with and without Tukey smoothing
+#Use 1024 window length for 375 Hz frequency resolution (Soldevilla used 400 Hz) 
+smooth <- calculateAverageSpectra_tukey(
+  study,
+  evNum = 1,
+  channel=1,
+  tukeyMedian = 5,
+  tukeyHanningSize = 5,
+  plot=FALSE,
+  wl=1024
+)
+
+raw <- calculateAverageSpectra(
+  study,
+  evNum = 1,
+  channel=1,
+  plot=FALSE,
+  wl=1024
+)
+
+ylim <- range(c(raw$avgSpec, smooth$avgSpec), na.rm = TRUE)
+
+```
+
+### Plot click spectra showing raw signal, with 5-point Hann smooth and Tukey double smooth  
+
+```{r}
+
+#Plot one click
+plot(raw$freq,raw$allSpec[,1],type='l',xlab="Frequency (kHz)",ylab="Level(dB)",xlim=c(19000,50000))
+lines(smooth$freq, smooth$allSpec[,1], lwd = 2)
+legend("bottomright", legend = c("Raw", "Tukey"), lwd = c(1, 2), bty = "n")
+
+#Plot a single click by UID, then step through clicks interactively (press Enter to advance)next
+browse_clicks(raw, tukeyMedian = 5, tukeyHanningSize = 5, fmin_khz = 19, fmax_khz = 50)
+```
+### Addition of pracma::findpeaks and quantmod::findvalleys to Raw
+
+```{r}
+
+#Load libraries
+library(pracma)
+library(quantmod)
+
+#Ensure kHz is being used
+to_khz <- function(freq) {
+  if (max(freq, na.rm = TRUE) > 1000) freq / 1000 else freq
+}
+
+#Hanning smoothing 
+hann5_smooth <- function(y) {
+  w <- signal::hanning(5)
+  w <- w / sum(w)
+
+  y_pad <- c(rep(y[1], 2), y, rep(y[length(y)], 2))
+  y_filt <- stats::filter(y_pad, filter = w, sides = 2)
+  as.numeric(y_filt[3:(length(y_filt) - 2)])
+}
+
+#Select one click and build spectra
+click_i <- 1  #Change number to test different clicks
+
+#Click UID
+click_uid <- as.character(raw$UID[click_i])
+
+freq_khz <- to_khz(raw$freq)
+
+y_raw   <- raw$allSpec[, click_i]
+y_tukey <- smooth$allSpec[, click_i]
+y_hann5 <- hann5_smooth(y_raw)
+
+#Raw spectrum
+y <- y_raw
+
+#Banding restriction (kHz)
+band <- freq_khz >= 19 & freq_khz <= 50 & is.finite(y)
+x_band <- freq_khz[band]
+y_band <- y[band]
+
+#Frequency resolution of the spectrum (kHz per FFT bin)
+freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
+
+#Peak-picking settings
+min_peak_separation_khz <- 0.3
+peak_height_quantile    <- 0.10
+
+# Convert separation from kHz to number of frequency bins
+min_peak_separation_bins <- max(
+  1, round(min_peak_separation_khz / freq_resolution_khz)
+)
+
+#Minimum peak height threshold (quantile-based)
+min_peak_height_db <- as.numeric(
+  quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
+)
+
+#-------------------------
+# Peaks (pracma::findpeaks)
+#-------------------------
+peaks <- pracma::findpeaks(
+  y_band,
+  minpeakheight   = min_peak_height_db,
+  minpeakdistance = min_peak_separation_bins
+)
+
+if (is.null(peaks) || nrow(peaks) == 0) {
+  detected_peaks_khz_db_Raw <- data.frame(freq_khz = numeric(), height_db = numeric())
+} else {
+  peak_indices <- peaks[, 2]
+  detected_peaks_khz_db_Raw <- data.frame(
+    freq_khz  = x_band[peak_indices],
+    height_db = y_band[peak_indices]
+  )
+}
+
+#Dataframe
+detected_peaks_khz_db_Raw
+
+#----------------------------
+# Notches (quantmod::findValleys)
+#----------------------------
+notch_idx <- quantmod::findValleys(y_band)
+
+# quantmod returns the index after the turn; shifting back usually lands on the true minimum
+if (length(notch_idx) == 0) {
+  detected_notches_khz_db_Raw <- data.frame(freq_khz = numeric(), height_db = numeric())
+} else {
+  notch_idx <- pmax(1, notch_idx - 1)
+  detected_notches_khz_db_Raw <- data.frame(
+    freq_khz  = x_band[notch_idx],
+    height_db = y_band[notch_idx]
+  )
+}
+
+#Dataframe
+detected_notches_khz_db_Raw
+
+#Visual confirmation from spectrum (Raw) with peaks + notches labeled
+plot(
+  freq_khz,
+  y_raw,
+  type = "l",
+  xlab = "Frequency (kHz)",
+  ylab = "Level (dB)",
+  xlim = c(19, 50),
+  ylim = c(-125, max(y_raw, na.rm = TRUE) + 3),
+  main = paste0("UID: ", click_uid, " — Raw spectrum (Peaks + Notches)")
+)
+
+#Peaks overlay (filled dots)
+if (nrow(detected_peaks_khz_db_Raw) > 0) {
+  points(detected_peaks_khz_db_Raw$freq_khz, detected_peaks_khz_db_Raw$height_db, pch = 19)
+  par(xpd = NA)
+  text(
+    detected_peaks_khz_db_Raw$freq_khz,
+    detected_peaks_khz_db_Raw$height_db,
+    labels = round(detected_peaks_khz_db_Raw$freq_khz, 2),
+    pos = 3,
+    cex = 0.7
+  )
+  par(xpd = FALSE)
+}
+
+#Notches overlay (open circles)
+if (nrow(detected_notches_khz_db_Raw) > 0) {
+  points(detected_notches_khz_db_Raw$freq_khz, detected_notches_khz_db_Raw$height_db, pch = 1)
+  par(xpd = NA)
+  text(
+    detected_notches_khz_db_Raw$freq_khz,
+    detected_notches_khz_db_Raw$height_db,
+    labels = round(detected_notches_khz_db_Raw$freq_khz, 2),
+    pos = 1,
+    cex = 0.65
+  )
+  par(xpd = FALSE)
+}
+
+```
+
+### Addition of pracma::findpeaks and quantmod::findvalleys to Tukey
+
+```{r}
+
+#Load libraries
+library(pracma)
+library(quantmod)
+
+#Ensure kHz is being used
+to_khz <- function(freq) {
+  if (max(freq, na.rm = TRUE) > 1000) freq / 1000 else freq
+}
+
+#Hanning smoothing (still computed here in case you need it later)
+hann5_smooth <- function(y) {
+  w <- signal::hanning(5)
+  w <- w / sum(w)
+
+  y_pad <- c(rep(y[1], 2), y, rep(y[length(y)], 2))
+  y_filt <- stats::filter(y_pad, filter = w, sides = 2)
+  as.numeric(y_filt[3:(length(y_filt) - 2)])
+}
+
+#Select one click and build spectra
+click_i <- 1  #Change number to test different clicks
+
+#Click UID
+click_uid <- as.character(raw$UID[click_i])
+
+freq_khz <- to_khz(raw$freq)
+
+y_raw   <- raw$allSpec[, click_i]
+y_tukey <- smooth$allSpec[, click_i]
+y_hann5 <- hann5_smooth(y_raw)
+
+#Tukey spectrum
+y <- y_tukey
+
+#Banding restriction (kHz)
+band <- freq_khz >= 19 & freq_khz <= 50 & is.finite(y)
+x_band <- freq_khz[band]
+y_band <- y[band]
+
+#Frequency resolution of the spectrum (kHz per FFT bin)
+freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
+
+#Peak-picking settings
+min_peak_separation_khz <- 0.3
+peak_height_quantile    <- 0.10
+
+# Convert separation from kHz to number of frequency bins
+min_peak_separation_bins <- max(
+  1, round(min_peak_separation_khz / freq_resolution_khz)
+)
+
+#Minimum peak height threshold (quantile-based)
+min_peak_height_db <- as.numeric(
+  quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
+)
+
+#-------------------------
+# Peaks (pracma::findpeaks)
+#-------------------------
+peaks <- pracma::findpeaks(
+  y_band,
+  minpeakheight   = min_peak_height_db,
+  minpeakdistance = min_peak_separation_bins
+)
+
+if (is.null(peaks) || nrow(peaks) == 0) {
+  detected_peaks_khz_db_Tukey <- data.frame(freq_khz = numeric(), height_db = numeric())
+} else {
+  peak_indices <- peaks[, 2]
+  detected_peaks_khz_db_Tukey <- data.frame(
+    freq_khz  = x_band[peak_indices],
+    height_db = y_band[peak_indices]
+  )
+}
+
+detected_peaks_khz_db_Tukey
+
+#----------------------------
+# Notches (quantmod::findValleys)
+#----------------------------
+notch_idx <- quantmod::findValleys(y_band)
+
+# quantmod returns the index after the turn; shifting back usually lands on the true minimum
+if (length(notch_idx) == 0) {
+  detected_notches_khz_db_Tukey <- data.frame(freq_khz = numeric(), height_db = numeric())
+} else {
+  notch_idx <- pmax(1, notch_idx - 1)
+  detected_notches_khz_db_Tukey <- data.frame(
+    freq_khz  = x_band[notch_idx],
+    height_db = y_band[notch_idx]
+  )
+}
+
+detected_notches_khz_db_Tukey
+
+#Visual confirmation from spectrum (Tukey) with peaks + notches labeled
+plot(
+  freq_khz,
+  y_tukey,
+  type = "l",
+  xlab = "Frequency (kHz)",
+  ylab = "Level (dB)",
+  xlim = c(19, 50),
+  ylim = c(-125, max(y_tukey, na.rm = TRUE) + 3),
+  main = paste0("UID: ", click_uid, " — Tukey spectrum (Peaks + Notches)")
+)
+
+#Peaks overlay (filled dots)
+if (nrow(detected_peaks_khz_db_Tukey) > 0) {
+  points(detected_peaks_khz_db_Tukey$freq_khz, detected_peaks_khz_db_Tukey$height_db, pch = 19)
+  par(xpd = NA)
+  text(
+    detected_peaks_khz_db_Tukey$freq_khz,
+    detected_peaks_khz_db_Tukey$height_db,
+    labels = round(detected_peaks_khz_db_Tukey$freq_khz, 2),
+    pos = 3,
+    cex = 0.7
+  )
+  par(xpd = FALSE)
+}
+
+#Notches overlay (open circles)
+if (nrow(detected_notches_khz_db_Tukey) > 0) {
+  points(detected_notches_khz_db_Tukey$freq_khz, detected_notches_khz_db_Tukey$height_db, pch = 1)
+  par(xpd = NA)
+  text(
+    detected_notches_khz_db_Tukey$freq_khz,
+    detected_notches_khz_db_Tukey$height_db,
+    labels = round(detected_notches_khz_db_Tukey$freq_khz, 2),
+    pos = 1,
+    cex = 0.65
+  )
+  par(xpd = FALSE)
+}
+
+```
+### Addition of pracma::findpeaks and quantmod::findvalleys to Hanning
+
+```{r}
+
+#Load libraries
+library(pracma)
+library(quantmod)
+
+#Ensure kHz is being used
+to_khz <- function(freq) {
+  if (max(freq, na.rm = TRUE) > 1000) freq / 1000 else freq
+}
+
+#Hanning smoothing (5-point Hann)
+hann5_smooth <- function(y) {
+  w <- signal::hanning(5)
+  w <- w / sum(w)
+
+  y_pad <- c(rep(y[1], 2), y, rep(y[length(y)], 2))
+  y_filt <- stats::filter(y_pad, filter = w, sides = 2)
+  as.numeric(y_filt[3:(length(y_filt) - 2)])
+}
+
+#Select one click and build spectra
+click_i <- 1  #Change number to test different clicks
+
+#Click UID
+click_uid <- as.character(raw$UID[click_i])
+
+freq_khz <- to_khz(raw$freq)
+
+y_raw   <- raw$allSpec[, click_i]
+y_tukey <- smooth$allSpec[, click_i]
+y_hann5 <- hann5_smooth(y_raw)
+
+#Hann-5 spectrum
+y <- y_hann5
+
+#Banding restriction (kHz)
+band <- freq_khz >= 19 & freq_khz <= 50 & is.finite(y)
+x_band <- freq_khz[band]
+y_band <- y[band]
+
+#Frequency resolution of the spectrum (kHz per FFT bin)
+freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
+
+#Peak-picking settings
+min_peak_separation_khz <- 0.3
+peak_height_quantile    <- 0.10
+
+# Convert separation from kHz to number of frequency bins
+min_peak_separation_bins <- max(
+  1, round(min_peak_separation_khz / freq_resolution_khz)
+)
+
+#Minimum peak height threshold (quantile-based)
+min_peak_height_db <- as.numeric(
+  quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
+)
+
+#-------------------------
+# Peaks (pracma::findpeaks)
+#-------------------------
+peaks <- pracma::findpeaks(
+  y_band,
+  minpeakheight   = min_peak_height_db,
+  minpeakdistance = min_peak_separation_bins
+)
+
+if (is.null(peaks) || nrow(peaks) == 0) {
+  detected_peaks_khz_db_Hann5 <- data.frame(freq_khz = numeric(), height_db = numeric())
+} else {
+  peak_indices <- peaks[, 2]
+  detected_peaks_khz_db_Hann5 <- data.frame(
+    freq_khz  = x_band[peak_indices],
+    height_db = y_band[peak_indices]
+  )
+}
+
+detected_peaks_khz_db_Hann5
+
+#----------------------------
+# Notches (quantmod::findValleys)
+#----------------------------
+notch_idx <- quantmod::findValleys(y_band)
+
+# quantmod returns the index after the turn; shifting back usually lands on the true minimum
+if (length(notch_idx) == 0) {
+  detected_notches_khz_db_Hann5 <- data.frame(freq_khz = numeric(), height_db = numeric())
+} else {
+  notch_idx <- pmax(1, notch_idx - 1)
+  detected_notches_khz_db_Hann5 <- data.frame(
+    freq_khz  = x_band[notch_idx],
+    height_db = y_band[notch_idx]
+  )
+}
+
+detected_notches_khz_db_Hann5
+
+#Visual confirmation from spectrum (Hann-5) with peaks + notches labeled
+plot(
+  freq_khz,
+  y_hann5,
+  type = "l",
+  xlab = "Frequency (kHz)",
+  ylab = "Level (dB)",
+  xlim = c(19, 50),
+  ylim = c(-125, max(y_hann5, na.rm = TRUE) + 3),
+  main = paste0("UID: ", click_uid, " — Hann-5 spectrum (Peaks + Notches)")
+)
+
+#Peaks overlay (filled dots)
+if (nrow(detected_peaks_khz_db_Hann5) > 0) {
+  points(detected_peaks_khz_db_Hann5$freq_khz,
+         detected_peaks_khz_db_Hann5$height_db,
+         pch = 19)
+  par(xpd = NA)
+  text(
+    detected_peaks_khz_db_Hann5$freq_khz,
+    detected_peaks_khz_db_Hann5$height_db,
+    labels = round(detected_peaks_khz_db_Hann5$freq_khz, 2),
+    pos = 3,
+    cex = 0.7
+  )
+  par(xpd = FALSE)
+}
+
+#Notches overlay (open circles)
+if (nrow(detected_notches_khz_db_Hann5) > 0) {
+  points(detected_notches_khz_db_Hann5$freq_khz,
+         detected_notches_khz_db_Hann5$height_db,
+         pch = 1)
+  par(xpd = NA)
+  text(
+    detected_notches_khz_db_Hann5$freq_khz,
+    detected_notches_khz_db_Hann5$height_db,
+    labels = round(detected_notches_khz_db_Hann5$freq_khz, 2),
+    pos = 1,
+    cex = 0.65
+  )
+  par(xpd = FALSE)
+}
+
+```
+### Combined plot: Raw vs Tukey vs Hann5 with pracma peaks and quantmod notches labeled
+
+```{R}
+
+library(pracma)
+library(quantmod)
+
+spectra_by_smoothing <- list(
+  Raw   = y_raw,
+  Tukey = y_tukey,
+  Hann5 = y_hann5
+)
+
+# Settings (consistent across all smoothing types)
+fmin_khz <- 19
+fmax_khz <- 50
+
+min_peak_separation_khz <- 0.3
+peak_height_quantile    <- 0.10
+
+# -------------------------
+# Peaks (pracma::findpeaks)
+# -------------------------
+detect_peaks_pracma <- function(y, freq_khz,
+                               fmin_khz, fmax_khz,
+                               min_peak_separation_khz,
+                               peak_height_quantile) {
+
+  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
+  x_band <- freq_khz[band]
+  y_band <- y[band]
+
+  freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
+
+  min_peak_separation_bins <- max(
+    1, round(min_peak_separation_khz / freq_resolution_khz)
+  )
+
+  min_peak_height_db <- as.numeric(
+    quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
+  )
+
+  peaks <- pracma::findpeaks(
+    y_band,
+    minpeakheight   = min_peak_height_db,
+    minpeakdistance = min_peak_separation_bins
+  )
+
+  if (is.null(peaks) || nrow(peaks) == 0) {
+    data.frame(peak_frequency_khz = numeric(), peak_level_db = numeric())
+  } else {
+    peak_indices <- peaks[, 2]
+    data.frame(
+      peak_frequency_khz = x_band[peak_indices],
+      peak_level_db      = y_band[peak_indices]
+    )
+  }
+}
+
+# -----------------------------
+# Notches (quantmod::findValleys)
+# -----------------------------
+detect_notches_quantmod <- function(y, freq_khz,
+                                   fmin_khz, fmax_khz,
+                                   shift_back = TRUE) {
+
+  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
+  x_band <- freq_khz[band]
+  y_band <- y[band]
+
+  notch_idx <- quantmod::findValleys(y_band)
+
+  if (length(notch_idx) == 0) {
+    data.frame(notch_frequency_khz = numeric(), notch_level_db = numeric())
+  } else {
+    if (shift_back) notch_idx <- pmax(1, notch_idx - 1)
+    data.frame(
+      notch_frequency_khz = x_band[notch_idx],
+      notch_level_db      = y_band[notch_idx]
+    )
+  }
+}
+
+# Run peaks + notches for each smoothing type
+peaks_by_smoothing <- lapply(
+  spectra_by_smoothing,
+  detect_peaks_pracma,
+  freq_khz = freq_khz,
+  fmin_khz = fmin_khz,
+  fmax_khz = fmax_khz,
+  min_peak_separation_khz = min_peak_separation_khz,
+  peak_height_quantile    = peak_height_quantile
+)
+
+notches_by_smoothing <- lapply(
+  spectra_by_smoothing,
+  detect_notches_quantmod,
+  freq_khz = freq_khz,
+  fmin_khz = fmin_khz,
+  fmax_khz = fmax_khz,
+  shift_back = TRUE
+)
+
+# Plot all three spectra on same axes
+y_all <- c(y_raw, y_tukey, y_hann5)
+
+plot(
+  freq_khz,
+  y_tukey,
+  type = "l",
+  xlab = "Frequency (kHz)",
+  ylab = "Level (dB)",
+  xlim = c(fmin_khz, fmax_khz),
+  ylim = c(-125, max(y_all, na.rm = TRUE) + 3),
+  main = paste0("UID: ", click_uid, " — Raw vs Tukey vs Hann5 (Peaks + Notches)")
+)
+
+lines(freq_khz, y_raw)
+lines(freq_khz, y_hann5, lty = 2)
+
+legend(
+  "bottomright",
+  legend = c("Raw", "Tukey", "Hann5", "Peaks", "Notches"),
+  lty = c(1, 1, 2, NA, NA),
+  pch = c(NA, NA, NA, 19, 1),
+  bty = "n"
+)
+
+# Label helpers
+label_peaks <- function(df, prefix = "") {
+  if (is.null(df) || nrow(df) == 0) return()
+  points(df$peak_frequency_khz, df$peak_level_db, pch = 19, cex = 0.6)
+  par(xpd = NA)
+  text(
+    df$peak_frequency_khz, df$peak_level_db,
+    labels = paste0(prefix, round(df$peak_frequency_khz, 2)),
+    pos = 3, cex = 0.55
+  )
+  par(xpd = FALSE)
+}
+
+label_notches <- function(df, prefix = "") {
+  if (is.null(df) || nrow(df) == 0) return()
+  points(df$notch_frequency_khz, df$notch_level_db, pch = 1, cex = 0.7)
+  par(xpd = NA)
+  text(
+    df$notch_frequency_khz, df$notch_level_db,
+    labels = paste0(prefix, round(df$notch_frequency_khz, 2)),
+    pos = 1, cex = 0.55
+  )
+  par(xpd = FALSE)
+}
+
+# Overlay peaks + notches for each smoothing type
+label_peaks(peaks_by_smoothing$Raw,   prefix = "R:")
+label_peaks(peaks_by_smoothing$Tukey, prefix = "T:")
+label_peaks(peaks_by_smoothing$Hann5, prefix = "H:")
+
+label_notches(notches_by_smoothing$Raw,   prefix = "Rn:")
+label_notches(notches_by_smoothing$Tukey, prefix = "Tn:")
+label_notches(notches_by_smoothing$Hann5, prefix = "Hn:")
+
+```
+
+### Table for all smoothing types (Peaks and Notches)
+
+```{R}
+
+#Table for all smoothing types (Peaks + Notches)
+
+detected_extrema_khz_db_All <- dplyr::bind_rows(
+
+  # ----------------
+  # Peaks (pracma)
+  # ----------------
+  data.frame(
+    UID = click_uid,
+    smoothing = "Raw",
+    extrema_type = "Peak",
+    frequency_khz = peaks_by_smoothing$Raw$peak_frequency_khz,
+    level_db      = peaks_by_smoothing$Raw$peak_level_db,
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    UID = click_uid,
+    smoothing = "Tukey",
+    extrema_type = "Peak",
+    frequency_khz = peaks_by_smoothing$Tukey$peak_frequency_khz,
+    level_db      = peaks_by_smoothing$Tukey$peak_level_db,
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    UID = click_uid,
+    smoothing = "Hann5",
+    extrema_type = "Peak",
+    frequency_khz = peaks_by_smoothing$Hann5$peak_frequency_khz,
+    level_db      = peaks_by_smoothing$Hann5$peak_level_db,
+    stringsAsFactors = FALSE
+  ),
+
+  # -------------------------
+  # Notches (quantmod)
+  # -------------------------
+  data.frame(
+    UID = click_uid,
+    smoothing = "Raw",
+    extrema_type = "Notch",
+    frequency_khz = notches_by_smoothing$Raw$notch_frequency_khz,
+    level_db      = notches_by_smoothing$Raw$notch_level_db,
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    UID = click_uid,
+    smoothing = "Tukey",
+    extrema_type = "Notch",
+    frequency_khz = notches_by_smoothing$Tukey$notch_frequency_khz,
+    level_db      = notches_by_smoothing$Tukey$notch_level_db,
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    UID = click_uid,
+    smoothing = "Hann5",
+    extrema_type = "Notch",
+    frequency_khz = notches_by_smoothing$Hann5$notch_frequency_khz,
+    level_db      = notches_by_smoothing$Hann5$notch_level_db,
+    stringsAsFactors = FALSE
+  )
+)
+
+#Dataframe
+detected_extrema_khz_db_All
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

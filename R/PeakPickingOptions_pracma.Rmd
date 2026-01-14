@@ -123,17 +123,18 @@ y_band <- y[band]
 #Frequency resolution of the spectrum (kHz per FFT bin)
 freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
 
-#Minimum allowed separation between peaks, in kHz - Original output used 0.6 value
+#Minimum allowed separation between peaks, in kHz
 min_peak_separation_khz <- 0.3
+peak_height_quantile <- 0.10
 
 # Convert separation from kHz to number of frequency bins
 min_peak_separation_bins <- max(
   1, round(min_peak_separation_khz / freq_resolution_khz)
 )
 
-#Minimum peak height threshold (quantile-based) - Original output used 0.85 value
+#Minimum peak height threshold (quantile-based)
 min_peak_height_db <- as.numeric(
-  quantile(y_band, probs = 0.10, na.rm = TRUE)
+  quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
 )
 
 #Find peaks
@@ -235,7 +236,8 @@ y_band <- y[band]
 freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
 
 #Minimum allowed separation between peaks, in kHz
-min_peak_separation_khz <- 0.6
+min_peak_separation_khz <- 0.3
+peak_height_quantile <- 0.10
 
 # Convert separation from kHz to number of frequency bins
 min_peak_separation_bins <- max(
@@ -244,11 +246,11 @@ min_peak_separation_bins <- max(
 
 #Minimum peak height threshold (quantile-based)
 min_peak_height_db <- as.numeric(
-  quantile(y_band, probs = 0.85, na.rm = TRUE)
+  quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
 )
 
 #Find peaks
-peaks <-pracma::findpeaks(
+peaks <- pracma::findpeaks(
   y_band,
   minpeakheight   = min_peak_height_db,
   minpeakdistance = min_peak_separation_bins
@@ -344,7 +346,8 @@ y_band <- y[band]
 freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
 
 #Minimum allowed separation between peaks, in kHz
-min_peak_separation_khz <- 0.6
+min_peak_separation_khz <- 0.3
+peak_height_quantile <- 0.10
 
 # Convert separation from kHz to number of frequency bins
 min_peak_separation_bins <- max(
@@ -353,7 +356,7 @@ min_peak_separation_bins <- max(
 
 #Minimum peak height threshold (quantile-based)
 min_peak_height_db <- as.numeric(
-  quantile(y_band, probs = 0.85, na.rm = TRUE)
+  quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
 )
 
 #Find peaks
@@ -421,19 +424,31 @@ spectra_by_smoothing <- list(
   Hann5 = y_hann5
 )
 
+# Peak-picking settings (keep consistent across Raw/Tukey/Hann5)
+min_peak_separation_khz <- 0.3
+peak_height_quantile    <- 0.10
+
 #Run pracma peak picking and return a clean peak table
 detect_peaks_pracma <- function(y, freq_khz,
                                 fmin_khz = 19, fmax_khz = 50,
-                                min_peak_separation_khz = 0.6,
-                                peak_height_quantile = 0.85) {
+                                min_peak_separation_khz = 0.3,
+                                peak_height_quantile = 0.10) {
 
   band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
   x_band <- freq_khz[band]
   y_band <- y[band]
 
   freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
-  min_peak_separation_bins <- max(1, round(min_peak_separation_khz / freq_resolution_khz))
-  min_peak_height_db <- as.numeric(quantile(y_band, probs = peak_height_quantile, na.rm = TRUE))
+
+  # Convert separation from kHz to number of bins
+  min_peak_separation_bins <- max(
+    1, round(min_peak_separation_khz / freq_resolution_khz)
+  )
+
+  # Quantile-based minimum peak height
+  min_peak_height_db <- as.numeric(
+    quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
+  )
 
   peaks <- pracma::findpeaks(
     y_band,
@@ -454,17 +469,17 @@ detect_peaks_pracma <- function(y, freq_khz,
     )
   }
 
-   list(
+  list(
     params = list(
-      freq_resolution_khz = freq_resolution_khz,
-      min_peak_height_db = min_peak_height_db,
+      freq_resolution_khz      = freq_resolution_khz,
+      min_peak_height_db       = min_peak_height_db,
       min_peak_separation_bins = min_peak_separation_bins
     ),
     detected_peaks_khz_db = detected_peaks_khz_db
   )
 }
 
-#Run peak picking for each smoothing type
+#Run peak picking for each smoothing type (uses the consistent settings above)
 peaks_by_smoothing <- lapply(
   spectra_by_smoothing,
   detect_peaks_pracma,
@@ -472,9 +487,9 @@ peaks_by_smoothing <- lapply(
   fmin_khz = 19,
   fmax_khz = 50,
   min_peak_separation_khz = min_peak_separation_khz,
-  peak_height_quantile = 0.85
+  peak_height_quantile    = peak_height_quantile
 )
-  
+
 #Plot all three spectra on the same axes
 y_all <- c(y_raw, y_tukey, y_hann5)
 plot(
@@ -484,7 +499,7 @@ plot(
   xlab = "Frequency (kHz)",
   ylab = "Level (dB)",
   xlim = c(19, 50),
-  ylim = c(-120, max(y_all, na.rm = TRUE)),
+  ylim = c(-120, max(y_all, na.rm = TRUE) + 3),
   main = paste0("UID: ", click_uid, " — Raw vs Tukey vs Hann5 + Peaks")
 )
 
@@ -500,20 +515,25 @@ legend(
 
 #Overlay peak points and label peak frequencies for each smoothing type
 label_peaks <- function(peak_df, label_prefix = "") {
-  if (nrow(peak_df) == 0) return()
-  points(peak_df$peak_frequency_khz, peak_df$peak_level_db, pch = 19, cex = 0.7)
+  if (is.null(peak_df) || nrow(peak_df) == 0) return()
+
+  points(peak_df$peak_frequency_khz, peak_df$peak_level_db, pch = 19, cex = 0.6)
+
+  par(xpd = NA)  # allow labels near the edges
   text(
     peak_df$peak_frequency_khz,
     peak_df$peak_level_db,
     labels = paste0(label_prefix, round(peak_df$peak_frequency_khz, 2)),
     pos = 3,
-    cex = 0.6
+    cex = 0.55
   )
+  par(xpd = FALSE)
 }
 
 label_peaks(peaks_by_smoothing$Raw$detected_peaks_khz_db,   label_prefix = "R:")
 label_peaks(peaks_by_smoothing$Tukey$detected_peaks_khz_db, label_prefix = "T:")
 label_peaks(peaks_by_smoothing$Hann5$detected_peaks_khz_db, label_prefix = "H:")
+
 
 ```
 
@@ -521,28 +541,27 @@ label_peaks(peaks_by_smoothing$Hann5$detected_peaks_khz_db, label_prefix = "H:")
 
 ```{R}
 
-#Table for all smoothing types (explicit binding)
-
+#Table for all smoothing types (from peaks_by_smoothing)
 detected_peaks_khz_db_All <- dplyr::bind_rows(
   data.frame(
     UID = click_uid,
     smoothing = "Raw",
-    peak_frequency_khz = detected_peaks_khz_db_Raw$freq_khz,
-    peak_level_db      = detected_peaks_khz_db_Raw$height_db,
+    peak_frequency_khz = peaks_by_smoothing$Raw$detected_peaks_khz_db$peak_frequency_khz,
+    peak_level_db      = peaks_by_smoothing$Raw$detected_peaks_khz_db$peak_level_db,
     stringsAsFactors = FALSE
   ),
   data.frame(
     UID = click_uid,
     smoothing = "Tukey",
-    peak_frequency_khz = detected_peaks_khz_db_Tukey$freq_khz,
-    peak_level_db      = detected_peaks_khz_db_Tukey$height_db,
+    peak_frequency_khz = peaks_by_smoothing$Tukey$detected_peaks_khz_db$peak_frequency_khz,
+    peak_level_db      = peaks_by_smoothing$Tukey$detected_peaks_khz_db$peak_level_db,
     stringsAsFactors = FALSE
   ),
   data.frame(
     UID = click_uid,
     smoothing = "Hann5",
-    peak_frequency_khz = detected_peaks_khz_db_Hanning$freq_khz,
-    peak_level_db      = detected_peaks_khz_db_Hanning$height_db,
+    peak_frequency_khz = peaks_by_smoothing$Hann5$detected_peaks_khz_db$peak_frequency_khz,
+    peak_level_db      = peaks_by_smoothing$Hann5$detected_peaks_khz_db$peak_level_db,
     stringsAsFactors = FALSE
   )
 )
@@ -550,8 +569,8 @@ detected_peaks_khz_db_All <- dplyr::bind_rows(
 #Dataframe
 detected_peaks_khz_db_All
 
-```
 
+```
 
 
 
