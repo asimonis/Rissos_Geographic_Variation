@@ -5,40 +5,6 @@ date: "2026-01-23"
 output: html_document
 ---
 
-### Reminders to self: 
-
-For each new drift / event in the same R session: 
-Edit:
-  DriftID <- "ADRIFT_0XX" 
-  evNum <- 1 
-Run (in order) :
-  Load study 
-  Process ONE manual event 
-  (Optional)
-  Dataframe display 
-  Histograms 
-Do NOT rerun:
-  Packages chunk 
-  Helper functions chunk 
-  Globals chunk
- 
-  
-Same drift, new event (same R session):
-Edit:
-  evNum <- 2   # set to the new event you want
-Run (in order):
-  Process ONE manual event (the chunk that calls         calculateAverageSpectra_* and appends to df_peaks_all/df_notches_all)
-  (Optional)
-  Dataframe display
-  Histograms
-Do NOT rerun:
-  Packages chunk
-  Helper functions chunk
-  Globals chunk
-
-Load study chunk (not needed if DriftID didn’t change and you haven’t cleared study)
-
-
 ```{r}
 
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
@@ -50,7 +16,10 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```{r}
 
 library("easypackages")
-libraries("PAMpal","PAMmisc","dplyr","here","lubridate","purrr","signal","fs","stringr","tidyr","ggplot2","pracma","quantmod")
+libraries(
+  "PAMpal","PAMmisc","dplyr","here","lubridate","purrr","signal","fs","stringr",
+  "tidyr","ggplot2","pracma","quantmod","tibble"
+)
 
 source(here('R',"TukeySmoothing.R"))
 
@@ -61,10 +30,10 @@ source(here('R',"TukeySmoothing.R"))
 ```{r}
 
 baseDir <- "E:/Analysis/"
-DriftID <- "ADRIFT_033"
+histBaseDir <- "E:/Analysis/Event Histograms"
 
-# MANUAL EVENT SELECTION
-evNum <- 1
+DriftID <- "ADRIFT_033"
+evNum   <- 1
 
 channel <- 1
 wl      <- 1024
@@ -81,35 +50,15 @@ peak_height_quantile    <- 0.10
 tukeyMedian      <- 5
 tukeyHanningSize <- 5
 
-```
-
-### Cumulative dataframes (DO NOT RUN EXCEPT FOR FIRST DRIFT FIRST EVENT)
-
-```{r}
-
-if (!exists("df_peaks_all")) {
-  df_peaks_all <- tibble::tibble(
-    DriftID = character(),
-    Event   = integer(),
-    UID     = character(),
-    smoothing = character(),  # "Tukey" or "Hann5"
-    peak_khz  = numeric()
-  )
-}
-
-if (!exists("df_notches_all")) {
-  df_notches_all <- tibble::tibble(
-    DriftID = character(),
-    Event   = integer(),
-    UID     = character(),
-    smoothing = character(),  # "Tukey" or "Hann5"
-    notch_khz = numeric()
-  )
-}
+# Output settings
+hist_bins <- 40
+img_w <- 10
+img_h <- 6
+img_dpi <- 300
 
 ```
 
-### Helper functions (DO NOT RUN EXCEPT FOR FIRST DRIFT FIRST EVENT)
+### Helper functions
 
 ```{r}
 
@@ -160,14 +109,33 @@ detect_notches_quantmod <- function(y, freq_khz, fmin_khz, fmax_khz, shift_back=
   x_band[notch_idx]
 }
 
+make_hist <- function(df, value_col, title, xlab, fmin_khz, fmax_khz, bins = 40) {
+  x_major <- seq(fmin_khz, fmax_khz, by = 1)
+  x_minor <- seq(fmin_khz, fmax_khz, by = 0.5)
+
+  ggplot(df, aes(x = .data[[value_col]])) +
+    geom_histogram(bins = bins) +
+    scale_x_continuous(
+      breaks = x_major,
+      minor_breaks = x_minor,
+      limits = c(fmin_khz, fmax_khz)
+    ) +
+    labs(x = xlab, y = "Number of clicks", title = title) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+save_plot <- function(p, filename, w = 10, h = 6, dpi = 300) {
+  ggsave(filename, p, width = w, height = h, dpi = dpi)
+}
+
 ```
 
-### Load study (ONLY RUN FOR NEW DRIFT)
+### Load study for this drift
 
 ```{r}
 
-binFolder <- paste0(baseDir, "/Binaries/", DriftID)
-db <- paste0(baseDir, "/Useable Databases/", DriftID, " - Clean.sqlite3")
+binFolder <- file.path(baseDir, "Binaries", DriftID)
+db <- file.path(baseDir, "Useable Databases", paste0(DriftID, " - Clean.sqlite3"))
 
 pps <- PAMpalSettings(
   db = db,
@@ -182,156 +150,161 @@ study <- processPgDetections(pps) %>% dplyr::filter(Channel == channel)
 
 ```
 
-### Process one event and add to dataframes
+### Process THIS event only into event-only dataframes
 
 ```{r}
 
-# Decide which events to run (manual only)
-if (exists("evNums")) {
-  events_to_run <- evNums
-} else {
-  events_to_run <- evNum
+message("Processing DriftID=", DriftID, " Event=", evNum)
+
+smooth <- calculateAverageSpectra_tukey(
+  study,
+  evNum = evNum,
+  channel = channel,
+  tukeyMedian = tukeyMedian,
+  tukeyHanningSize = tukeyHanningSize,
+  plot = FALSE,
+  wl = wl
+)
+
+raw <- calculateAverageSpectra(
+  study,
+  evNum = evNum,
+  channel = channel,
+  plot = FALSE,
+  wl = wl
+)
+
+freq_khz <- to_khz(raw$freq)
+n_clicks <- ncol(raw$allSpec)
+
+if (is.null(n_clicks) || n_clicks == 0) {
+  stop("No clicks found for this event. Check DriftID, evNum, channel.")
 }
 
-for (ev in events_to_run) {
+# Event-only dataframes (fresh every run)
+df_peaks <- tibble::tibble(
+  DriftID = character(),
+  Event   = integer(),
+  UID     = character(),
+  smoothing = character(),
+  peak_khz  = numeric()
+)
 
-  message("Processing DriftID=", DriftID, " Event=", ev)
+df_notches <- tibble::tibble(
+  DriftID = character(),
+  Event   = integer(),
+  UID     = character(),
+  smoothing = character(),
+  notch_khz = numeric()
+)
 
-  smooth <- calculateAverageSpectra_tukey(
-    study,
-    evNum = ev,
-    channel = channel,
-    tukeyMedian = tukeyMedian,
-    tukeyHanningSize = tukeyHanningSize,
-    plot = FALSE,
-    wl = wl
+for (i in seq_len(n_clicks)) {
+  uid <- as.character(raw$UID[i])
+
+  y_raw   <- raw$allSpec[, i]
+  y_tukey <- smooth$allSpec[, i]
+  y_hann5 <- hann5_smooth(y_raw)
+
+  # Tukey
+  tukey_peaks <- detect_peaks_pracma(
+    y_tukey, freq_khz, fmin_khz, fmax_khz,
+    min_peak_separation_khz, peak_height_quantile
+  )
+  tukey_notches <- detect_notches_quantmod(
+    y_tukey, freq_khz, fmin_khz, fmax_khz, shift_back = TRUE
   )
 
-  raw <- calculateAverageSpectra(
-    study,
-    evNum = ev,
-    channel = channel,
-    plot = FALSE,
-    wl = wl
+  # Hann5
+  hann_peaks <- detect_peaks_pracma(
+    y_hann5, freq_khz, fmin_khz, fmax_khz,
+    min_peak_separation_khz, peak_height_quantile
+  )
+  hann_notches <- detect_notches_quantmod(
+    y_hann5, freq_khz, fmin_khz, fmax_khz, shift_back = TRUE
   )
 
-  freq_khz <- to_khz(raw$freq)
-
-  n_clicks <- ncol(raw$allSpec)
-  if (is.null(n_clicks) || n_clicks == 0) next
-
-  for (i in seq_len(n_clicks)) {
-    uid <- as.character(raw$UID[i])
-
-    y_raw   <- raw$allSpec[, i]
-    y_tukey <- smooth$allSpec[, i]
-    y_hann5 <- hann5_smooth(y_raw)
-
-    # Tukey
-    tukey_peaks <- detect_peaks_pracma(
-      y_tukey, freq_khz, fmin_khz, fmax_khz,
-      min_peak_separation_khz, peak_height_quantile
+  if (length(tukey_peaks) > 0) {
+    df_peaks <- dplyr::bind_rows(
+      df_peaks,
+      tibble::tibble(DriftID = DriftID, Event = evNum, UID = uid, smoothing = "Tukey", peak_khz = tukey_peaks)
     )
-    tukey_notches <- detect_notches_quantmod(
-      y_tukey, freq_khz, fmin_khz, fmax_khz, shift_back = TRUE
+  }
+  if (length(hann_peaks) > 0) {
+    df_peaks <- dplyr::bind_rows(
+      df_peaks,
+      tibble::tibble(DriftID = DriftID, Event = evNum, UID = uid, smoothing = "Hann5", peak_khz = hann_peaks)
     )
+  }
 
-    # Hann5
-    hann_peaks <- detect_peaks_pracma(
-      y_hann5, freq_khz, fmin_khz, fmax_khz,
-      min_peak_separation_khz, peak_height_quantile
+  if (length(tukey_notches) > 0) {
+    df_notches <- dplyr::bind_rows(
+      df_notches,
+      tibble::tibble(DriftID = DriftID, Event = evNum, UID = uid, smoothing = "Tukey", notch_khz = tukey_notches)
     )
-    hann_notches <- detect_notches_quantmod(
-      y_hann5, freq_khz, fmin_khz, fmax_khz, shift_back = TRUE
+  }
+  if (length(hann_notches) > 0) {
+    df_notches <- dplyr::bind_rows(
+      df_notches,
+      tibble::tibble(DriftID = DriftID, Event = evNum, UID = uid, smoothing = "Hann5", notch_khz = hann_notches)
     )
-
-    # Append (one row per detected value)
-    if (length(tukey_peaks) > 0) {
-      df_peaks_all <<- dplyr::bind_rows(
-        df_peaks_all,
-        tibble::tibble(DriftID = DriftID, Event = ev, UID = uid, smoothing = "Tukey", peak_khz = tukey_peaks)
-      )
-    }
-    if (length(hann_peaks) > 0) {
-      df_peaks_all <<- dplyr::bind_rows(
-        df_peaks_all,
-        tibble::tibble(DriftID = DriftID, Event = ev, UID = uid, smoothing = "Hann5", peak_khz = hann_peaks)
-      )
-    }
-
-    if (length(tukey_notches) > 0) {
-      df_notches_all <<- dplyr::bind_rows(
-        df_notches_all,
-        tibble::tibble(DriftID = DriftID, Event = ev, UID = uid, smoothing = "Tukey", notch_khz = tukey_notches)
-      )
-    }
-    if (length(hann_notches) > 0) {
-      df_notches_all <<- dplyr::bind_rows(
-        df_notches_all,
-        tibble::tibble(DriftID = DriftID, Event = ev, UID = uid, smoothing = "Hann5", notch_khz = hann_notches)
-      )
-    }
   }
 }
 
+df_peaks
+df_notches
+
 ```
 
-### Dataframes
+### Make and save histograms for this event
 
 ```{r}
 
-df_peaks_all
-df_notches_all
+# Ensure drift output folder exists
+# Ensure drift + event output folders exist
+driftHistDir <- file.path(histBaseDir, DriftID)
+eventFolderName <- sprintf("Event_%03d", evNum)
+eventHistDir <- file.path(driftHistDir, eventFolderName)
+
+if (!dir.exists(eventHistDir)) dir.create(eventHistDir, recursive = TRUE)
+
+# Filter per smoothing type
+tukey_peaks_df   <- dplyr::filter(df_peaks, smoothing == "Tukey")
+tukey_notches_df <- dplyr::filter(df_notches, smoothing == "Tukey")
+hann_peaks_df    <- dplyr::filter(df_peaks, smoothing == "Hann5")
+hann_notches_df  <- dplyr::filter(df_notches, smoothing == "Hann5")
+
+# Create plots
+p_tp <- make_hist(tukey_peaks_df, "peak_khz",
+                  paste0(DriftID, " | Event ", evNum, " | Tukey Peaks"),
+                  "Peak frequency (kHz)", fmin_khz, fmax_khz, hist_bins)
+
+p_tn <- make_hist(tukey_notches_df, "notch_khz",
+                  paste0(DriftID, " | Event ", evNum, " | Tukey Notches"),
+                  "Notch frequency (kHz)", fmin_khz, fmax_khz, hist_bins)
+
+p_hp <- make_hist(hann_peaks_df, "peak_khz",
+                  paste0(DriftID, " | Event ", evNum, " | Hann5 Peaks"),
+                  "Peak frequency (kHz)", fmin_khz, fmax_khz, hist_bins)
+
+p_hn <- make_hist(hann_notches_df, "notch_khz",
+                  paste0(DriftID, " | Event ", evNum, " | Hann5 Notches"),
+                  "Notch frequency (kHz)", fmin_khz, fmax_khz, hist_bins)
+
+# Filenames
+f_tp <- file.path(eventHistDir, sprintf("%s_Event_%03d_Tukey_Peaks.png",   DriftID, evNum))
+f_tn <- file.path(eventHistDir, sprintf("%s_Event_%03d_Tukey_Notches.png", DriftID, evNum))
+f_hp <- file.path(eventHistDir, sprintf("%s_Event_%03d_Hann5_Peaks.png",   DriftID, evNum))
+f_hn <- file.path(eventHistDir, sprintf("%s_Event_%03d_Hann5_Notches.png", DriftID, evNum))
+
+# Save
+save_plot(p_tp, f_tp, w = img_w, h = img_h, dpi = img_dpi)
+save_plot(p_tn, f_tn, w = img_w, h = img_h, dpi = img_dpi)
+save_plot(p_hp, f_hp, w = img_w, h = img_h, dpi = img_dpi)
+save_plot(p_hn, f_hn, w = img_w, h = img_h, dpi = img_dpi)
+
+message("Saved histograms to: ", eventHistDir)
 
 ```
-
-### Generate histograms
-
-```{r}
-
-x_major <- seq(fmin_khz, fmax_khz, by = 1)     # labeled ticks every 1 kHz
-x_minor <- seq(fmin_khz, fmax_khz, by = 0.5)   # extra gridlines
-
-# Tukey peaks
-ggplot(dplyr::filter(df_peaks_all, smoothing == "Tukey"),
-       aes(x = peak_khz)) +
-  geom_histogram(bins = 40) +
-  scale_x_continuous(breaks = x_major, minor_breaks = x_minor) +
-  labs(x = "Peak frequency (kHz)",
-       y = "Number of clicks",
-       title = "Tukey Peaks") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Tukey notches
-ggplot(dplyr::filter(df_notches_all, smoothing == "Tukey"),
-       aes(x = notch_khz)) +
-  geom_histogram(bins = 40) +
-  scale_x_continuous(breaks = x_major, minor_breaks = x_minor) +
-  labs(x = "Notch frequency (kHz)",
-       y = "Number of clicks",
-       title = "Tukey Notches") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Hann5 peaks
-ggplot(dplyr::filter(df_peaks_all, smoothing == "Hann5"),
-       aes(x = peak_khz)) +
-  geom_histogram(bins = 40) +
-  scale_x_continuous(breaks = x_major, minor_breaks = x_minor) +
-  labs(x = "Peak frequency (kHz)",
-       y = "Number of clicks",
-       title = "Hann5 Peaks") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Hann5 notches
-ggplot(dplyr::filter(df_notches_all, smoothing == "Hann5"),
-       aes(x = notch_khz)) +
-  geom_histogram(bins = 40) +
-  scale_x_continuous(breaks = x_major, minor_breaks = x_minor) +
-  labs(x = "Notch frequency (kHz)",
-       y = "Number of clicks",
-       title = "Hann5 Notches") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-```
-
-
-
 
 
 
