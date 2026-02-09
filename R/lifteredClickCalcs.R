@@ -1,67 +1,52 @@
 lifteredClickCalcs <- function (data, sr_hz = "auto", calibration = NULL,
-                              filterfrom_khz = 10, 
-                              filterto_khz = 80, winLen_sec = 0.0025) 
+                                filterfrom_khz = 10,
+                                filterto_khz = 80, winLen_sec = 0.0025)
 {
   result <- list()
-  paramNames <- c("noiseLevel", "duration", 
-                  "peakTime", "peak", "peak2", 
+  paramNames <- c("noiseLevel", "duration",
+                  "peakTime", "peak", "peak2",
                   "peak3", "trough", "trough2",
-                  "peakToPeak2", "peakToPeak3", 
+                  "peakToPeak2", "peakToPeak3",
                   "peak2ToPeak3", "dBPP", "Q_10dB",
                   "fmin_10dB","fmax_10dB", "BW_10dB",
                   "centerkHz_10dB", "Q_3dB",
                   "fmin_3dB","fmax_3dB", "BW_3dB",
-                  "centerkHz_3dB")
+                  "centerkHz_3dB",
+                  "wave")  # <-- NEW base name, becomes liftered_wave after rename
   
-  ## ---- hpLifterClick helper (from 05_Liftering.Rmd) -----------------
+  ## ---- hpLifterClick helper -----------------
   hpLifterClick <- function(data,
                             calibration = NULL,
                             n_remove    = 6,
                             return_wave = TRUE,
                             chan        = 1,
                             ...) {
-    # data$wave: matrix, rows = samples, cols = channels
-    # data$sr  : sample rate (Hz)
     
-    # --- basic checks & setup ---
     if (is.null(data$wave)) {
       stop("data$wave is NULL – hpLifterClick expects data$wave to be a matrix.")
     }
     
     wave <- data$wave
-    if (!is.matrix(wave)) {
-      wave <- as.matrix(wave)
-    }
+    if (!is.matrix(wave)) wave <- as.matrix(wave)
     
     n_chan <- ncol(wave)
-    if (n_chan < 1) {
-      stop("data$wave has zero channels.")
-    }
+    if (n_chan < 1) stop("data$wave has zero channels.")
     if (chan < 1 || chan > n_chan) {
-      stop("Requested chan = ", chan,
-           " but data$wave has only ", n_chan, " channel(s).")
+      stop("Requested chan = ", chan, " but data$wave has only ", n_chan, " channel(s).")
     }
     
-    # --- PAMpal requirement: one row per channel ---
-    # Make a data.frame with n_chan rows.
     result <- data.frame(ChannelIdx = seq_len(n_chan))
     
-    # If you don't want a dummy column, you can drop ChannelIdx later; it’s harmless.
-    
     if (return_wave) {
-      # Preallocate list-column with NA for each channel
       result$liftered_wave <- replicate(n_chan, NA, simplify = FALSE)
       
-      # --- process ONLY the selected channel ---
       x <- as.numeric(wave[, chan])
       n <- length(x)
       
-      # FFT-based cepstral high-pass liftering
       spec    <- fft(x)
       logSpec <- log(Mod(spec) + .Machine$double.eps)
       cep     <- Re(fft(logSpec, inverse = TRUE)) / n
       
-      # Zero out the first n_remove quefrency bins
       if (n_remove > 0 && n_remove < length(cep)) {
         cep[1:n_remove] <- 0
       }
@@ -70,7 +55,6 @@ lifteredClickCalcs <- function (data, sr_hz = "auto", calibration = NULL,
       spec_hp    <- exp(logSpec_hp) * exp(1i * Arg(spec))
       x_hp       <- Re(fft(spec_hp, inverse = TRUE)) / n
       
-      # Store only for the selected channel row
       result$liftered_wave[[chan]] <- x_hp
     }
     
@@ -85,13 +69,12 @@ lifteredClickCalcs <- function (data, sr_hz = "auto", calibration = NULL,
   if (!is.matrix(data$wave)) {
     data$wave <- matrix(data$wave, ncol = 1)
   }
+  
   neededVals <- c("wave")
-  if (sr_hz == "auto") {
-    neededVals <- c(neededVals, "sr")
-  }
+  if (sr_hz == "auto") neededVals <- c(neededVals, "sr")
   missingVals <- neededVals[!(neededVals %in% names(data))]
   if (length(missingVals) > 0) {
-    pamWarning("Values for ", paste(missingVals, collapse = ", "), 
+    pamWarning("Values for ", paste(missingVals, collapse = ", "),
                " are missing.", "These are required for Click Calculations, please fix.")
     return(NULL)
   }
@@ -100,38 +83,32 @@ lifteredClickCalcs <- function (data, sr_hz = "auto", calibration = NULL,
     
     thisWave <- data$wave[, chan]
     
-   #apply hp liftering to this channel >>>
+    # --- apply hp liftering to this channel
     lifter_res <- hpLifterClick(
       data = list(wave = as.matrix(thisWave)),
       chan = 1,
       return_wave = TRUE
     )
     thisWave <- lifter_res$liftered_wave[[1]]
-    ## -------------------------------------------------------------------
+    # ---------------------------------------------------------------
     
     if (all(thisWave == 0)) {
       blanks <- data.frame(matrix(NA, nrow = 1, ncol = length(paramNames)))
       colnames(blanks) <- paramNames
+      blanks$wave <- I(list(NA))  # <-- ensure list-column exists
       result[[chan]] <- blanks
       next
     }
-    if (sr_hz == "auto") {
-      sr <- data$sr
-    }
-    else {
-      sr <- sr_hz
-    }
+    
+    if (sr_hz == "auto") sr <- data$sr else sr <- sr_hz
+    
     if (inherits(filterfrom_khz, "Arma")) {
       thisWave <- signal::filtfilt(filterfrom_khz, thisWave)@.Data
-    }
-    else if (filterfrom_khz > 0) {
+    } else if (filterfrom_khz > 0) {
       if (!is.null(filterto_khz)) {
         to_hz <- filterto_khz * 1000
-        if (to_hz >= sr/2) {
-          to_hz <- NULL
-        }
-      }
-      else {
+        if (to_hz >= sr/2) to_hz <- NULL
+      } else {
         to_hz <- NULL
       }
       thisWave <- seewave::bwfilter(thisWave, f = sr, n = 4,
@@ -139,85 +116,103 @@ lifteredClickCalcs <- function (data, sr_hz = "auto", calibration = NULL,
                                     to   = to_hz,
                                     output = "sample")
     }
+    
     peakTime <- (which.max(abs(thisWave)) - 1)/sr
+    
     fftSize <- round(sr * winLen_sec, 0)
     fftSize <- fftSize + (fftSize%%2)
+    
     thisWave <- PAMpal:::clipAroundPeak(thisWave, fftSize)
+    
+    # ---- NEW: keep the exact waveform used for spectral calcs
+    liftered_wave_used <- thisWave
+    
     thisTk <- seewave:::TKEO(thisWave, f = sr, M = 1, plot = FALSE)
     tkEnergy <- thisTk[1:length(thisWave), 2]
     tkDb <- 10 * log10(tkEnergy - min(tkEnergy, na.rm = TRUE))
     tkDb <- tkDb - max(tkDb, na.rm = TRUE)
     tkDb[!is.finite(tkDb)] <- NA
+    
     noiseLevel <- median(tkDb, na.rm = TRUE)
-    if (is.na(noiseLevel)) {
-      noiseLevel <- 0
-    }
+    if (is.na(noiseLevel)) noiseLevel <- 0
+    
     thisDf <- list(noiseLevel = noiseLevel)
+    
     noiseThresh <- quantile(thisTk[, 2], probs = 0.4, na.rm = TRUE) * 100
     dur <- subset(thisTk, thisTk[, 2] >= noiseThresh)
-    if (length(dur) == 0) {
-      dur <- 0
-    }
-    else {
-      dur <- 1e+06 * (max(dur[, 1]) - min(dur[, 1]))
-    }
+    
+    if (length(dur) == 0) dur <- 0 else dur <- 1e+06 * (max(dur[, 1]) - min(dur[, 1]))
+    
     thisDf$duration <- dur
     thisDf$peakTime <- peakTime
+    
     thisSpec <- seewave:::spec(thisWave, f = sr, wl = fftSize,
-                               norm = FALSE, 
+                               norm = FALSE,
                                correction = "amplitude",
                                plot = FALSE)
-    if (any(thisSpec[, 2] == 0)) {
-      thisSpec[thisSpec[, 2] == 0, 2] <- 1e-13
-    }
+    
+    if (any(thisSpec[, 2] == 0)) thisSpec[thisSpec[, 2] == 0, 2] <- 1e-13
+    
     if (any(is.nan(thisSpec[, 2]))) {
       blanks <- data.frame(matrix(NA, nrow = 1, ncol = length(paramNames)))
       colnames(blanks) <- paramNames
+      blanks$wave <- I(list(NA))
       result[[chan]] <- blanks
       next
     }
+    
     relDb <- 20 * log10(thisSpec[, 2])
-    if (any(!is.finite(relDb))) {
-      relDb[!is.finite(relDb)] <- NA
-    }
+    if (any(!is.finite(relDb))) relDb[!is.finite(relDb)] <- NA
+    
     freq <- seq(from = 0,
                 by   = thisSpec[2, 1] - thisSpec[1, 1],
                 length.out = nrow(thisSpec))
+    
     if (!is.null(calibration)) {
       if (is.function(calibration)) {
         calFun <- calibration
-      }
-      else if (is.character(calibration)) {
+      } else if (is.character(calibration)) {
         calFun <- findCalibration(calibration)
       }
       relDb <- relDb + calFun(freq * 1000)
     }
+    
     calibratedClick <- cbind(freq, relDb)
+    
     peakData <- lapply(peakTrough(calibratedClick), unname)
     thisDf <- c(thisDf, peakData)
+    
     dBPP <- 20 * log10(max(thisWave) - min(thisWave))
-    if (!is.null(calibration)) {
-      dBPP <- dBPP + calFun(peakData$peak * 1000)
-    }
+    if (!is.null(calibration)) dBPP <- dBPP + calFun(peakData$peak * 1000)
     thisDf$dBPP <- dBPP
+    
     dbBW10 <- PAMpal:::Qfast(calibratedClick, f = sr, level = -10, plot = FALSE)
     names(dbBW10) <- c("Q_10dB", "fmin_10dB", "fmax_10dB", "BW_10dB")
     dbBW10$centerkHz_10dB <- dbBW10$fmax_10dB - (dbBW10$BW_10dB/2)
+    
     dbBW3 <- PAMpal:::Qfast(calibratedClick, f = sr, level = -3, plot = FALSE)
     names(dbBW3) <- c("Q_3dB", "fmin_3dB", "fmax_3dB", "BW_3dB")
     dbBW3$centerkHz_3dB <- dbBW3$fmax_3dB - (dbBW3$BW_3dB/2)
+    
     thisDf <- c(thisDf, dbBW10, dbBW3)
+    
+    # ---- NEW: add waveform as a list-column under base name 'wave'
+    thisDf$wave <- list(liftered_wave_used)
+    
     result[[chan]] <- thisDf
   }
-  result <- bind_rows(result)
+  
+  result <- dplyr::bind_rows(result)
+  
+  # Prefix all names with liftered_
   names(result) <- paste0("liftered_", names(result))
+  
+  # Waveform column exactly: liftered_wave
   result
 }
 
 
-
-#Define Functions: create spectrogram for a single waveform, then concatenate into a matrix
-#Follow general approach of Soldevilla et al 2017. Apply high-pass lifter to remove first 6 quefrencies.
+# ---- Plotting helpers left unchanged below ----
 
 clickSpectraMatrix <- function(waves, sr, nfft = 512) {
   if (!is.list(waves) || length(waves) == 0) {
@@ -232,7 +227,6 @@ clickSpectraMatrix <- function(waves, sr, nfft = 512) {
     stop("All waveforms in 'waves' must have the same length.")
   }
   
-  # one-sided frequency axis
   freqs <- seq(0, sr/2, length.out = nfft/2 + 1)
   
   click_spec <- function(x) {
@@ -242,29 +236,28 @@ clickSpectraMatrix <- function(waves, sr, nfft = 512) {
       x <- x[seq_len(nfft)]
     }
     X <- fft(x)
-    P <- (Mod(X)^2) / (nfft * sr)   # power spectrum
+    P <- (Mod(X)^2) / (nfft * sr)
     P[1:(nfft/2 + 1)]
   }
   
-  spec_mat <- sapply(waves, click_spec)          # freq × clicks
+  spec_mat <- sapply(waves, click_spec)
   spec_db  <- 10 * log10(spec_mat + .Machine$double.eps)
   
-  list(freqs = freqs, spec_db = spec_db)        # freq × clicks
+  list(freqs = freqs, spec_db = spec_db)
 }
 
 plotClickSpectrogram <- function(
-  waves,
-  sr,
-  nfft     = 512,
-  flim     = NULL,       # c(fmin, fmax) in Hz
-  log_freq = FALSE,
-  main     = "Click spectra by click number"
+    waves,
+    sr,
+    nfft     = 512,
+    flim     = NULL,
+    log_freq = FALSE,
+    main     = "Click spectra by click number"
 ) {
   cs <- clickSpectraMatrix(waves, sr, nfft)
   freqs   <- cs$freqs
-  spec_db <- cs$spec_db   # freq × clicks
+  spec_db <- cs$spec_db
   
-  # apply frequency limits
   if (!is.null(flim)) {
     if (length(flim) != 2) stop("flim must be c(fmin, fmax)")
     keep <- which(freqs >= flim[1] & freqs <= flim[2])
@@ -275,17 +268,15 @@ plotClickSpectrogram <- function(
   n_clicks <- ncol(spec_db)
   
   if (!log_freq) {
-    # linear frequency axis
     image(
       x = 1:n_clicks,
       y = freqs,
-      z = t(spec_db),          # clicks × freq for image()
+      z = t(spec_db),
       xlab = "Click number",
       ylab = "Frequency (Hz)",
       main = main
     )
   } else {
-    # log-scaled frequency axis
     plot(1,
          type = "n",
          xlim = c(1, n_clicks),
@@ -297,7 +288,7 @@ plotClickSpectrogram <- function(
     
     z <- t(spec_db)
     z_norm <- (z - min(z, na.rm = TRUE)) /
-              (max(z, na.rm = TRUE) - min(z, na.rm = TRUE))
+      (max(z, na.rm = TRUE) - min(z, na.rm = TRUE))
     
     rasterImage(
       as.raster(z_norm),
@@ -312,18 +303,17 @@ plotClickSpectrogram <- function(
 }
 
 plotMeanClickSpectrum <- function(
-  waves,
-  sr,
-  nfft     = 512,
-  flim     = NULL,
-  log_freq = FALSE,
-  main     = "Mean spectrum across clicks"
+    waves,
+    sr,
+    nfft     = 512,
+    flim     = NULL,
+    log_freq = FALSE,
+    main     = "Mean spectrum across clicks"
 ) {
   cs <- clickSpectraMatrix(waves, sr, nfft)
   freqs   <- cs$freqs
-  spec_db <- cs$spec_db   # freq × clicks
+  spec_db <- cs$spec_db
   
-  # apply frequency limits
   if (!is.null(flim)) {
     if (length(flim) != 2) stop("flim must be c(fmin, fmax)")
     keep <- which(freqs >= flim[1] & freqs <= flim[2])
@@ -332,11 +322,8 @@ plotMeanClickSpectrum <- function(
   }
   
   mean_spec_db <- rowMeans(spec_db, na.rm = TRUE)
-  
-   # Convert frequency to kHz for plotting
   freqs_khz <- freqs / 1000
   
-  # ---- PLOT (frequency in kHz) ----
   if (!log_freq) {
     plot(
       freqs_khz, mean_spec_db,
@@ -356,9 +343,6 @@ plotMeanClickSpectrum <- function(
     )
   }
   
-  invisible(list(
-    freqs_khz     = freqs_khz,
-    mean_spec_db  = mean_spec_db
-  ))
+  invisible(list(freqs_khz = freqs_khz, mean_spec_db = mean_spec_db))
 }
 

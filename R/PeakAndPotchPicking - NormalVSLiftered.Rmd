@@ -1,0 +1,394 @@
+---
+title: "PeakAndPotchPicking - NormalVSLiftered"
+author: "Sarah Shiers"
+date: "2026-02-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+```
+
+### Packages
+
+```{r}
+
+library("easypackages")
+libraries(
+  "PAMpal","PAMmisc","dplyr","here","lubridate","purrr","signal","fs","stringr",
+  "tidyr","ggplot2","pracma","quantmod","tibble"
+)
+
+```
+
+### Source files (run once per R session)
+
+```{r}
+
+source(here('R',"TukeySmoothing.R"))
+source(here('R','lifteredClickCalcs.R'))
+
+```
+
+### User inputs (run per drift / event)
+
+```{r}
+
+baseDir <- "E:/Analysis/"
+DriftID <- "ADRIFT_033"
+evNum   <- 1          # 1-based event number you want
+channel <- 1
+wl      <- 1024
+
+# Tukey parameters (keep consistent across normal + liftered)
+tukeyMedian      <- 5
+tukeyHanningSize <- 5
+
+# Peak/notch detection band (kHz)
+fmin_khz <- 19
+fmax_khz <- 50
+
+# Peak picking knobs
+min_peak_separation_khz <- 0.3
+peak_height_quantile    <- 0.10
+
+```
+
+### Output RDS files (run once per R session)
+
+```{r}
+
+outDir <- "C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/R"
+fs::dir_create(outDir)
+
+normal_rds <- file.path(outDir, "extrema_normal.rds")
+lifter_rds <- file.path(outDir, "extrema_liftered.rds")
+
+```
+
+### Helper functions (run once per R session)
+
+```{r}
+to_khz <- function(freq_hz) {
+  if (max(freq_hz, na.rm = TRUE) > 1000) freq_hz / 1000 else freq_hz
+}
+
+hann_smooth <- function(y, n = 5) {
+  w <- signal::hanning(n)
+  w <- w / sum(w)
+  pad <- floor(n/2)
+  y_pad <- c(rep(y[1], pad), y, rep(y[length(y)], pad))
+  y_filt <- stats::filter(y_pad, filter = w, sides = 2)
+  as.numeric(y_filt[(pad+1):(length(y_filt)-pad)])
+}
+
+tukey_double_smooth <- function(y, tukeyMedian = 5, tukeyHanningSize = 5) {
+  y_med  <- stats::runmed(y, k = tukeyMedian, endrule = "median")
+  hann_smooth(y_med, n = tukeyHanningSize)
+}
+
+spectra_from_waves <- function(waves, sr_hz, wl = 1024) {
+  waves <- waves[!is.na(waves)]
+  if (length(waves) == 0) stop("No waves provided to spectra_from_waves().")
+
+  freq_hz <- (0:(wl/2)) * (sr_hz / wl)
+
+  spec_list <- lapply(waves, function(w) {
+    w <- as.numeric(w)
+    if (length(w) < wl) {
+      w <- c(w, rep(0, wl - length(w)))
+    } else if (length(w) > wl) {
+      w <- w[1:wl]
+    }
+
+    win <- signal::hanning(wl)
+    w_win <- w * win
+
+    X <- fft(w_win)
+    mag <- Mod(X)[1:(wl/2 + 1)]
+    20 * log10(mag + 1e-12)
+  })
+
+  allSpec <- do.call(cbind, spec_list)
+  avgSpec <- rowMeans(allSpec, na.rm = TRUE)
+
+  list(freq_hz = freq_hz, allSpec = allSpec, avgSpec = avgSpec)
+}
+
+detect_peaks_pracma <- function(y, freq_khz,
+                               fmin_khz, fmax_khz,
+                               min_peak_separation_khz,
+                               peak_height_quantile) {
+  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
+  x_band <- freq_khz[band]
+  y_band <- y[band]
+  if (length(y_band) < 5) return(data.frame(freq_khz = numeric(), level_db = numeric()))
+
+  freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
+  min_peak_separation_bins <- max(1, round(min_peak_separation_khz / freq_resolution_khz))
+  min_peak_height_db <- as.numeric(quantile(y_band, probs = peak_height_quantile, na.rm = TRUE))
+
+  peaks <- pracma::findpeaks(
+    y_band,
+    minpeakheight   = min_peak_height_db,
+    minpeakdistance = min_peak_separation_bins
+  )
+
+  if (is.null(peaks) || nrow(peaks) == 0) {
+    data.frame(freq_khz = numeric(), level_db = numeric())
+  } else {
+    idx <- peaks[, 2]
+    data.frame(freq_khz = x_band[idx], level_db = y_band[idx])
+  }
+}
+
+detect_notches_quantmod <- function(y, freq_khz, fmin_khz, fmax_khz, shift_back = TRUE) {
+  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
+  x_band <- freq_khz[band]
+  y_band <- y[band]
+  if (length(y_band) < 5) return(data.frame(freq_khz = numeric(), level_db = numeric()))
+
+  idx <- quantmod::findValleys(y_band)
+  if (length(idx) == 0) {
+    data.frame(freq_khz = numeric(), level_db = numeric())
+  } else {
+    if (shift_back) idx <- pmax(1, idx - 1)
+    data.frame(freq_khz = x_band[idx], level_db = y_band[idx])
+  }
+}
+
+append_rds <- function(path, df_new) {
+  if (file.exists(path)) {
+    df_old <- readRDS(path)
+    all_cols <- union(names(df_old), names(df_new))
+    df_old <- df_old %>% dplyr::mutate(across(setdiff(all_cols, names(df_old)), ~NA))
+    df_new <- df_new %>% dplyr::mutate(across(setdiff(all_cols, names(df_new)), ~NA))
+    df_out <- dplyr::bind_rows(df_old[, all_cols], df_new[, all_cols])
+  } else {
+    df_out <- df_new
+  }
+
+  df_out <- df_out %>%
+    dplyr::distinct(
+      DriftID, Event, UID, study_type, smoothing, extrema_type, frequency_khz, level_db,
+      .keep_all = TRUE
+    )
+
+  saveRDS(df_out, path)
+  df_out
+}
+
+extract_extrema_for_spec <- function(spec, freq_khz, study_type, DriftID, evNum) {
+  UIDs <- as.character(spec$UID)
+  nclicks <- ncol(spec$allSpec)
+
+  if (length(UIDs) != nclicks) {
+    stop("UID length does not match number of spectra columns.")
+  }
+
+  out <- vector("list", nclicks)
+
+  for (j in seq_len(nclicks)) {
+    y <- spec$allSpec[, j]
+
+    peaks_j <- detect_peaks_pracma(
+      y = y,
+      freq_khz = freq_khz,
+      fmin_khz = fmin_khz,
+      fmax_khz = fmax_khz,
+      min_peak_separation_khz = min_peak_separation_khz,
+      peak_height_quantile = peak_height_quantile
+    ) %>%
+      dplyr::rename(frequency_khz = freq_khz, level_db = level_db) %>%
+      dplyr::mutate(
+        DriftID = DriftID,
+        Event = evNum,
+        UID = UIDs[j],
+        study_type = study_type,
+        smoothing = "Tukey",
+        extrema_type = "Peak"
+      )
+
+    notches_j <- detect_notches_quantmod(
+      y = y,
+      freq_khz = freq_khz,
+      fmin_khz = fmin_khz,
+      fmax_khz = fmax_khz,
+      shift_back = TRUE
+    ) %>%
+      dplyr::rename(frequency_khz = freq_khz, level_db = level_db) %>%
+      dplyr::mutate(
+        DriftID = DriftID,
+        Event = evNum,
+        UID = UIDs[j],
+        study_type = study_type,
+        smoothing = "Tukey",
+        extrema_type = "Notch"
+      )
+
+    out[[j]] <- dplyr::bind_rows(peaks_j, notches_j)
+  }
+
+  dplyr::bind_rows(out)
+}
+
+```
+
+### PAMpal settings (run per drift / event)
+
+```{r}
+
+binFolder <- file.path(baseDir, "Binaries", DriftID)
+db <- file.path(baseDir, "Useable Databases", paste0(DriftID, " - Clean.sqlite3"))
+
+# fail early if path wrong
+if (!dir.exists(binFolder)) stop("Binaries folder not found: ", binFolder)
+if (!file.exists(db)) stop("DB not found: ", db)
+
+pps_base <- PAMpalSettings(
+  db = db,
+  binaries = binFolder,
+  sr_hz = "auto",
+  winLen_sec = 0.0025,
+  filterfrom_khz = 10,
+  filterto_khz = 80
+)
+
+```
+
+
+### Normal study (run per drift / event)
+
+```{r}
+
+study_normal <- processPgDetections(pps_base) %>%
+  dplyr::filter(Channel == channel)
+
+spec_normal <- calculateAverageSpectra_tukey(
+  study_normal,
+  evNum = evNum,
+  channel = channel,
+  tukeyMedian = tukeyMedian,
+  tukeyHanningSize = tukeyHanningSize,
+  plot = FALSE,
+  wl = wl
+)
+
+freq_khz_normal <- to_khz(spec_normal$freq)
+
+```
+
+### Liftered study (run per drift / event)
+
+```{r}
+pps_lift <- addFunction(
+  pps_base, lifteredClickCalcs,
+  module = "ClickDetector",
+  default = TRUE,
+  sr_hz = "auto",
+  calibration = NULL,
+  filterfrom_khz = 10,
+  filterto_khz = 80,
+  winLen_sec = 0.0025
+)
+
+study_lift <- processPgDetections(pps_lift)
+
+lift_df <- getClickData(study_lift)
+
+# optional: filter clickData by channel if present
+if ("Channel" %in% names(lift_df)) {
+  lift_df <- lift_df %>% dplyr::filter(Channel == channel)
+}
+
+# map evNum to eventId group
+ev_groups <- split(lift_df, lift_df$eventId)
+if (length(ev_groups) == 0) stop("No events found in liftered click data.")
+if (evNum < 1 || evNum > length(ev_groups)) stop("evNum out of range for liftered data.")
+lift_ev <- ev_groups[[evNum]]
+
+waves_lift <- lift_ev$liftered_wave
+uids_lift  <- as.character(lift_ev$UID)
+
+keep <- !is.na(waves_lift) & lengths(waves_lift) > 0
+waves_lift <- waves_lift[keep]
+uids_lift  <- uids_lift[keep]
+if (length(waves_lift) == 0) stop("Selected liftered event has no usable liftered_wave.")
+
+sr_hz <- study_lift[[1]]@settings$sr
+
+spec_lift_raw <- spectra_from_waves(waves_lift, sr_hz = sr_hz, wl = wl)
+
+allSpec_lift_tukey <- apply(
+  spec_lift_raw$allSpec, 2, tukey_double_smooth,
+  tukeyMedian = tukeyMedian,
+  tukeyHanningSize = tukeyHanningSize
+)
+allSpec_lift_tukey <- as.matrix(allSpec_lift_tukey)
+
+spec_lift <- list(
+  freq = spec_lift_raw$freq_hz,
+  allSpec = allSpec_lift_tukey,
+  avgSpec = rowMeans(allSpec_lift_tukey, na.rm = TRUE),
+  UID = uids_lift
+)
+
+freq_khz_lift <- to_khz(spec_lift$freq)
+
+```
+
+### Extract peaks + notches (run per drift / event)
+
+```{r}
+
+extrema_normal_new <- extract_extrema_for_spec(
+  spec = spec_normal,
+  freq_khz = freq_khz_normal,
+  study_type = "normal",
+  DriftID = DriftID,
+  evNum = evNum
+)
+
+extrema_lifter_new <- extract_extrema_for_spec(
+  spec = spec_lift,
+  freq_khz = freq_khz_lift,
+  study_type = "liftered",
+  DriftID = DriftID,
+  evNum = evNum
+)
+
+# optional sanity
+dplyr::count(extrema_normal_new, extrema_type)
+dplyr::count(extrema_lifter_new, extrema_type)
+
+
+```
+
+### Append to the two RDS files (run per drift / event)
+
+```{r}
+
+normal_all <- append_rds(normal_rds, extrema_normal_new)
+lifter_all <- append_rds(lifter_rds, extrema_lifter_new)
+
+tail(normal_all, 10)
+tail(lifter_all, 10)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
