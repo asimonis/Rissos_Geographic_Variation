@@ -3,6 +3,9 @@ title: "PeakAndPotchPicking - NormalVSLiftered"
 author: "Sarah Shiers"
 date: "2026-02-08"
 output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
 ```{r setup, include=FALSE}
@@ -37,8 +40,8 @@ source(here('R','lifteredClickCalcs.R'))
 ```{r}
 
 baseDir <- "E:/Analysis/"
-DriftID <- "ADRIFT_033"
-evNum   <- 1          # 1-based event number you want
+DriftID <- "ADRIFT_003"
+evNum   <- 1         # 1-based event number you want
 channel <- 1
 wl      <- 1024
 
@@ -258,7 +261,6 @@ pps_base <- PAMpalSettings(
 
 ```
 
-
 ### Normal study (run per drift / event)
 
 ```{r}
@@ -378,17 +380,236 @@ tail(lifter_all, 10)
 
 ```
 
+### Extrema-count histogram (raw RDS rows)
 
+Saved as: <DriftID>*Event*\<###\>\_Tukey_2x2_extremaCount.png
 
+What this actually is: This histogram counts every row in the RDS. Each
+detected peak or notch is counted independently. If one click produces 8
+peaks and 8 notches, that single click contributes 16 counts across
+bins.
 
+Why counts are high: You are counting extrema instances, not clicks.
+This is expected to be the largest-count plot.
 
+```{r}
 
+### Extrema-count histograms (old look): counts ALL detected extrema instances (not clicks)
 
+# output folder
+eventDir <- file.path(histBaseDir, DriftID, sprintf("Event_%03d", evNum))
+fs::dir_create(eventDir)
 
+# load + filter to this drift/event/tukey
+normal_all <- readRDS(normal_rds)
+lifter_all <- readRDS(lifter_rds)
 
+df <- dplyr::bind_rows(normal_all, lifter_all) %>%
+  dplyr::filter(
+    DriftID == DriftID,
+    Event == evNum,
+    smoothing == "Tukey",
+    is.finite(frequency_khz),
+    frequency_khz >= fmin_khz,
+    frequency_khz <= fmax_khz,
+    study_type %in% c("normal", "liftered"),
+    extrema_type %in% c("Peak", "Notch")
+  ) %>%
+  dplyr::mutate(
+    study_type   = factor(study_type, levels = c("normal", "liftered")),
+    extrema_type = factor(extrema_type, levels = c("Peak", "Notch"))
+  )
 
+# plot: same binning idea as the older script (bins = hist_bins)
+p_extrema <- ggplot2::ggplot(df, ggplot2::aes(x = frequency_khz)) +
+  ggplot2::geom_histogram(bins = hist_bins) +
+  ggplot2::facet_grid(study_type ~ extrema_type) +
+  ggplot2::scale_x_continuous(
+    breaks = seq(fmin_khz, fmax_khz, by = 1),
+    minor_breaks = seq(fmin_khz, fmax_khz, by = 0.5),
+    limits = c(fmin_khz, fmax_khz)
+  ) +
+  ggplot2::labs(
+    title = paste0(DriftID, " | Event ", evNum, " | Tukey | extrema-count"),
+    x = "Frequency (kHz)",
+    y = "Count of extrema"
+  ) +
+  ggplot2::theme_grey(base_size = 12) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+    plot.title  = ggplot2::element_text(face = "bold")
+  )
 
+print(p_extrema)
 
+out_extrema <- file.path(eventDir, sprintf("%s_Event_%03d_Tukey_2x2_extremaCount.png", DriftID, evNum))
+ggplot2::ggsave(out_extrema, p_extrema, width = 12, height = 7, dpi = 300)
+message("Saved: ", out_extrema)
 
+```
 
+### Binned extrema histogram (still extrema, not clicks)
 
+Saved as: <DriftID>*Event*\<###\>\_Tukey_2x2.png
+
+What this actually is: This is the same data as above, just binned using
+geom_histogram(binwidth = 1). No UID logic is applied. No deduplication
+occurs. This is not a click-count plot.
+
+Important correction: This plot does not represent “how many clicks show
+this frequency.” It represents how many extrema fall in each 1 kHz bin.
+
+Why it looks similar to (1): Because it is the same thing — only
+re-binned.
+
+```{r}
+
+histBaseDir <- "E:/Analysis/Event Histograms"
+driftDir    <- file.path(histBaseDir, DriftID)
+eventDir    <- file.path(driftDir, paste0("Event_", sprintf("%03d", evNum)))
+fs::dir_create(eventDir)
+
+x_major <- seq(fmin_khz, fmax_khz, by = 1)
+x_minor <- seq(fmin_khz, fmax_khz, by = 0.5)
+
+normal_all <- readRDS(normal_rds)
+lifter_all <- readRDS(lifter_rds)
+
+all_extrema <- dplyr::bind_rows(normal_all, lifter_all) %>%
+  dplyr::filter(
+    DriftID == DriftID,
+    Event   == evNum,
+    smoothing == "Tukey",
+    is.finite(frequency_khz),
+    frequency_khz >= fmin_khz,
+    frequency_khz <= fmax_khz
+  ) %>%
+  dplyr::mutate(
+    study_type   = factor(study_type, levels = c("normal", "liftered")),
+    extrema_type = factor(extrema_type, levels = c("Peak", "Notch"))
+  )
+
+if (nrow(all_extrema) == 0) {
+  stop("No Tukey extrema rows found for ", DriftID, " Event ", evNum)
+}
+
+p_2x2 <- ggplot2::ggplot(all_extrema, ggplot2::aes(x = frequency_khz)) +
+  ggplot2::geom_histogram(
+    binwidth = 1,
+    boundary = fmin_khz
+  ) +
+  ggplot2::facet_grid(study_type ~ extrema_type) +
+  ggplot2::scale_x_continuous(
+    breaks = x_major,
+    minor_breaks = x_minor,
+    limits = c(fmin_khz, fmax_khz)
+  ) +
+  ggplot2::labs(
+    title = paste0(DriftID, " | Event ", evNum, " | Tukey"),
+    x = "Frequency (kHz)",
+    y = "Number of clicks"
+  ) +
+  ggplot2::theme_grey(base_size = 12) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+    plot.title  = ggplot2::element_text(face = "bold")
+  )
+
+print(p_2x2)
+
+out_png <- file.path(
+  eventDir,
+  sprintf("%s_Event_%03d_Tukey_2x2.png", DriftID, evNum)
+)
+
+ggplot2::ggsave(out_png, p_2x2, width = 12, height = 7, dpi = 300)
+message("Saved: ", out_png)
+
+```
+
+### Click-count histogram (unique UID per 1 kHz bin)
+
+Saved as: <DriftID>*Event*\<###\>\_Tukey_2x2_perUID.png
+
+What this actually is: This histogram explicitly collapses the data so
+that each UID can contribute at most one count per bin. If a click has
+multiple peaks or notches inside the same 1 kHz bin, it is still counted
+once.
+
+What question this answers: “How many unique clicks show at least one
+peak/notch in this frequency bin?”
+
+Critical clarification: This is the only plot that matches the
+conceptual intent of the original histograms.
+
+```{r}
+
+histBaseDir <- "E:/Analysis/Event Histograms"
+driftDir    <- file.path(histBaseDir, DriftID)
+eventDir    <- file.path(driftDir, paste0("Event_", sprintf("%03d", evNum)))
+fs::dir_create(eventDir)
+
+normal_all <- readRDS(normal_rds)
+lifter_all <- readRDS(lifter_rds)
+
+all_extrema <- dplyr::bind_rows(normal_all, lifter_all) %>%
+  dplyr::filter(
+    DriftID == DriftID,
+    Event   == evNum,
+    smoothing == "Tukey",
+    is.finite(frequency_khz),
+    frequency_khz >= fmin_khz,
+    frequency_khz <= fmax_khz
+  ) %>%
+  dplyr::mutate(
+    study_type   = factor(study_type, levels = c("normal", "liftered")),
+    extrema_type = factor(extrema_type, levels = c("Peak", "Notch"))
+  )
+
+if (nrow(all_extrema) == 0) stop("No Tukey extrema rows found for this DriftID/Event in RDS.")
+
+# 1) Assign each extrema to a 1 kHz bin [k, k+1)
+# 2) Deduplicate: one count per UID per bin (presence)
+uid_bin_presence <- all_extrema %>%
+  dplyr::mutate(bin_khz = floor(frequency_khz)) %>%
+  dplyr::filter(bin_khz >= fmin_khz, bin_khz <= fmax_khz) %>%
+  dplyr::distinct(study_type, extrema_type, UID, bin_khz)
+
+uid_counts <- uid_bin_presence %>%
+  dplyr::count(study_type, extrema_type, bin_khz, name = "n_clicks")
+
+all_bins <- tibble::tibble(bin_khz = seq(fmin_khz, fmax_khz, by = 1))
+uid_counts <- uid_counts %>%
+  tidyr::complete(study_type, extrema_type, bin_khz = all_bins$bin_khz, fill = list(n_clicks = 0))
+
+x_major <- seq(fmin_khz, fmax_khz, by = 1)
+x_minor <- seq(fmin_khz, fmax_khz, by = 0.5)
+
+p_uid <- ggplot2::ggplot(uid_counts, ggplot2::aes(x = bin_khz, y = n_clicks)) +
+  ggplot2::geom_col(width = 1) +  # exactly 1 kHz wide bars
+  ggplot2::facet_grid(study_type ~ extrema_type) +
+  ggplot2::scale_x_continuous(
+    breaks = x_major,
+    minor_breaks = x_minor,
+    limits = c(fmin_khz, fmax_khz + 1),   # +1 so last bin [50,51) has room if fmax=50
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(
+    title = paste0(DriftID, " | Event ", evNum, " | Tukey | Per UID"),
+    x = "Frequency (kHz)",
+    y = "Number of clicks"
+  ) +
+  ggplot2::theme_grey(base_size = 12) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+    panel.grid.minor = ggplot2::element_blank(),  # reduces the “striping”
+    plot.title = ggplot2::element_text(face = "bold")
+  )
+
+print(p_uid)
+
+out_png <- file.path(eventDir, sprintf("%s_Event_%03d_Tukey_2x2_perUID.png", DriftID, evNum))
+ggplot2::ggsave(out_png, p_uid, width = 12, height = 7, dpi = 300)
+message("Saved: ", out_png)
+
+```
