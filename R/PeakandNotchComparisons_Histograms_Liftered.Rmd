@@ -5,28 +5,500 @@ date: "2026-02-13"
 output: html_document
 ---
 
+```{r}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+```
+
+### Install packages
+
+```{r}
+
+library("easypackages")
+libraries(
+  "PAMpal","PAMmisc","dplyr","here","lubridate","purrr","signal","fs","stringr",
+  "tidyr","ggplot2","pracma","quantmod","tibble"
+)
+
+source(here("R", "lifteredClickCalcs.R"))
+source(here("R", "TukeySmoothing.R"))
+
+```
+
+### User-defined drift ID and event number
+
+```{r}
+
+# Base directories
+baseDir <- "E:/Analysis"
+extremaBaseDir <- file.path(baseDir, "Event Extrema")
+histBaseDir    <- file.path(baseDir, "Event Histograms")
+
+# Study identifiers
+DriftID <- "ADRIFT_003"
+evNum   <- 1
+channel <- 1
+
+# FFT / spectral parameters
+wl <- 1024
+
+# Frequency band (kHz)
+fmin_khz <- 19
+fmax_khz <- 50
+
+# Peak picking parameters
+min_peak_separation_khz <- 0.3
+peak_height_quantile    <- 0.10
+
+# Tukey smoothing (frequency-domain only)
+tukeyMedian    <- 3
+tukeyTaperSize <- 3
+
+# Histogram output
+img_w <- 10
+img_h <- 6
+img_dpi <- 300
+
+```
+
+### Helper functions
+
+```{r}
+
+to_khz <- function(freq) {
+  if (max(freq, na.rm = TRUE) > 1000) freq / 1000 else freq
+}
+
+# FFT from liftered waveform (CRITICAL)
+compute_spectrum_from_wave <- function(wave, sr_hz, wl) {
+
+  wave <- wave[1:min(length(wave), wl)]
+  wave <- wave * signal::hann(length(wave))
+
+  spec <- abs(fft(wave))
+  spec <- spec[1:(length(spec) / 2)]
+
+  freq <- seq(0, sr_hz / 2, length.out = length(spec))
+
+  tibble(
+    freq_hz  = freq,
+    spectrum = 20 * log10(spec + .Machine$double.eps)
+  )
+}
+
+# Peak / notch detection helpers
+detect_peaks_pracma <- function(y, freq_khz, fmin_khz, fmax_khz,
+                               min_peak_separation_khz, peak_height_quantile) {
+
+  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
+  x_band <- freq_khz[band]
+  y_band <- y[band]
+
+  if (length(x_band) < 3) return(numeric(0))
+
+  freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
+  min_peak_separation_bins <- max(
+    1, round(min_peak_separation_khz / freq_resolution_khz)
+  )
+
+  min_peak_height_db <- as.numeric(
+    quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
+  )
+
+  peaks <- pracma::findpeaks(
+    y_band,
+    minpeakheight   = min_peak_height_db,
+    minpeakdistance = min_peak_separation_bins
+  )
+
+  if (is.null(peaks) || nrow(peaks) == 0) numeric(0) else x_band[peaks[, 2]]
+}
+
+detect_notches_quantmod <- function(y, freq_khz, fmin_khz, fmax_khz) {
+
+  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
+  x_band <- freq_khz[band]
+  y_band <- y[band]
+
+  if (length(x_band) < 3) return(numeric(0))
+
+  idx <- quantmod::findValleys(y_band)
+  if (length(idx) == 0) return(numeric(0))
+
+  x_band[pmax(1, idx - 1)]
+}
+
+```
+
+### Load PAMpal study with liftering
+
+```{r}
+
+binFolder <- file.path(baseDir, "Binaries", DriftID)
+db <- file.path(
+  baseDir,
+  "Useable Databases",
+  paste0(DriftID, " - Clean.sqlite3")
+)
+
+pps <- PAMpalSettings(
+  db = db,
+  binaries = binFolder,
+  sr_hz = "auto",
+  winLen_sec = 0.0025,
+  filterfrom_khz = 10,
+  filterto_khz = 80
+)
+
+pps <- addFunction(
+  pps,
+  lifteredClickCalcs,
+  module = "ClickDetector",
+  default = TRUE
+)
+
+study_liftered <- processPgDetections(pps)
+
+# Select event directly from study (event-centric PAMpal)
+event_obj <- study_liftered@events[[evNum]]
+
+# Extract liftered click-level data
+liftered_click_data <- getClickData(event_obj) |>
+  dplyr::filter(Channel == channel)
+
+if (nrow(liftered_click_data) == 0) {
+  stop("No clicks found for this event.")
+}
+
+```
+
+###Create output directories
+
+```{r}
+
+eventFolderName <- sprintf("Event_%03d", evNum)
+
+eventExtremaDir <- file.path(extremaBaseDir, DriftID, eventFolderName)
+eventHistDir    <- file.path(histBaseDir,    DriftID, eventFolderName)
+
+if (!dir.exists(eventExtremaDir)) {
+  dir.create(eventExtremaDir, recursive = TRUE)
+}
+
+if (!dir.exists(eventHistDir)) {
+  dir.create(eventHistDir, recursive = TRUE)
+}
+
+```
+
+### Extract liftered click data (event-level)
+
+```{r}
+
+# Select event directly
+event_obj <- study_liftered@events[[evNum]]
+
+# Extract click-level liftered data
+liftered_click_data <- getClickData(event_obj) |>
+  dplyr::filter(Channel == channel)
+
+if (nrow(liftered_click_data) == 0) {
+  stop("No clicks found for this event/channel.")
+}
+
+```
+
+### Build liftered and Tukey-smoothed spectra
+
+```{r}
+
+# ---- Derive sampling rate from waveform length and duration ----
+# PAMpal stores liftered_duration in microseconds
+
+sr_vals <- liftered_click_data |>
+  dplyr::mutate(
+    sr_est = lengths(liftered_wave) / (liftered_duration * 1e-6)
+  ) |>
+  dplyr::pull(sr_est)
+
+# Use median for robustness to edge effects
+sr_hz <- as.numeric(round(stats::median(sr_vals, na.rm = TRUE)))
+
+stopifnot(
+  length(sr_hz) == 1L,
+  is.finite(sr_hz),
+  sr_hz > 0
+)
 
 
+# ---- Helper: compute spectrum from a single waveform ----
+compute_spectrum_from_wave <- function(wave, sr_hz, wl) {
+
+  # Truncate waveform to window length
+  n <- min(length(wave), wl)
+  wave <- wave[seq_len(n)]
+
+  # Apply Hann window (R uses hanning())
+  wave <- wave * signal::hanning(n)
+
+  # FFT (magnitude)
+  spec <- abs(stats::fft(wave))
+  spec <- spec[seq_len(floor(length(spec) / 2))]
+
+  # Frequency axis
+  freq <- seq(0, sr_hz / 2, length.out = length(spec))
+
+  tibble::tibble(
+    freq_hz  = freq,
+    spectrum = 20 * log10(spec + .Machine$double.eps)
+  )
+}
 
 
+# ---- Compute spectra from liftered waveforms ----
+liftered_event_spectra <- liftered_click_data |>
+  dplyr::select(UID, liftered_wave) |>
+  dplyr::mutate(
+    spec = purrr::map(
+      liftered_wave,
+      compute_spectrum_from_wave,
+      sr_hz = sr_hz,
+      wl    = wl
+    )
+  ) |>
+  tidyr::unnest(spec) |>
+  dplyr::mutate(freq_khz = freq_hz / 1000)
 
 
+# ---- Tukey smoothing helper (frequency domain) ----
+applyTukeySmoothing <- function(spec,
+                                tukeyMedian = 5,
+                                tukeyHanningSize = 5) {
 
+  # Median smoothing (robust to spikes)
+  spec_med <- stats::runmed(
+    spec,
+    k = tukeyMedian,
+    endrule = "median"
+  )
 
+  # Hanning window kernel
+  h <- signal::hanning(tukeyHanningSize)
+  h <- h / sum(h)
 
+  # Convolution smoothing
+  spec_smooth <- stats::filter(spec_med, h, sides = 2)
 
+  # Fill edge NAs
+  spec_smooth[is.na(spec_smooth)] <- spec_med[is.na(spec_smooth)]
 
+  as.numeric(spec_smooth)
+}
 
+```
 
+### Detect extrema
 
+```{r}
 
+# ---- Initialize output container ----
+liftered_tukey_event_extrema <- tibble::tibble(
+  DriftID        = character(),
+  Event          = integer(),
+  UID            = character(),
+  extremum_type  = character(),
+  frequency_khz  = numeric()
+)
 
+# Defensive check
+stopifnot(
+  "UID" %in% names(liftered_event_spectra),
+  "freq_khz" %in% names(liftered_event_spectra)
+)
 
+use_tukey <- "spectrum_tukey" %in% names(liftered_event_spectra)
 
+# ---- Loop over clicks ----
+for (uid in unique(liftered_event_spectra$UID)) {
 
+  spec_df <- liftered_event_spectra |>
+    dplyr::filter(UID == uid)
 
+  # Select spectrum safely
+  y <- if (use_tukey) spec_df$spectrum_tukey else spec_df$spectrum
+  freq_khz <- spec_df$freq_khz
 
+  # Drop non-finite values (critical)
+  ok <- is.finite(y) & is.finite(freq_khz)
+  y <- y[ok]
+  freq_khz <- freq_khz[ok]
 
+  # Skip malformed clicks
+  if (length(y) < 3) next
+
+  # ---- Peak detection ----
+  peaks <- detect_peaks_pracma(
+    y,
+    freq_khz,
+    fmin_khz,
+    fmax_khz,
+    min_peak_separation_khz,
+    peak_height_quantile
+  )
+
+  if (length(peaks) > 0) {
+    liftered_tukey_event_extrema <- dplyr::bind_rows(
+      liftered_tukey_event_extrema,
+      tibble::tibble(
+        DriftID        = DriftID,
+        Event          = evNum,
+        UID            = uid,
+        extremum_type  = "peak",
+        frequency_khz  = peaks
+      )
+    )
+  }
+
+  # ---- Notch detection ----
+  notches <- detect_notches_quantmod(
+    y,
+    freq_khz,
+    fmin_khz,
+    fmax_khz
+  )
+
+  if (length(notches) > 0) {
+    liftered_tukey_event_extrema <- dplyr::bind_rows(
+      liftered_tukey_event_extrema,
+      tibble::tibble(
+        DriftID        = DriftID,
+        Event          = evNum,
+        UID            = uid,
+        extremum_type  = "notch",
+        frequency_khz  = notches
+      )
+    )
+  }
+}
+
+# ---- Final sanity check ----
+liftered_tukey_event_extrema
+
+# Count extrema by type
+liftered_extrema_counts <- liftered_tukey_event_extrema |>
+  dplyr::count(extremum_type, name = "n_extrema")
+
+liftered_extrema_counts
+
+```
+
+### Save RDS
+
+```{r}
+
+eventFolderName <- sprintf("Event_%03d", evNum)
+eventExtremaDir <- file.path(extremaBaseDir, DriftID, eventFolderName)
+
+if (!dir.exists(eventExtremaDir)) {
+  dir.create(eventExtremaDir, recursive = TRUE)
+}
+
+saveRDS(
+  liftered_tukey_event_extrema,
+  file.path(
+    eventExtremaDir,
+    sprintf("%s_Event_%03d_Liftered_Tukey_Extrema.rds", DriftID, evNum)
+  )
+)
+
+```
+
+### Histograms
+
+```{r}
+
+eventHistDir <- file.path(histBaseDir, DriftID, eventFolderName)
+
+if (!dir.exists(eventHistDir)) {
+  dir.create(eventHistDir, recursive = TRUE)
+}
+
+breaks_1khz <- seq(fmin_khz, fmax_khz, by = 1)
+x_ticks <- seq(fmin_khz, fmax_khz, by = 1)
+
+plot_histogram_to_file <- function(values, title, outfile) {
+
+  png(outfile, width = img_w, height = img_h, units = "in", res = img_dpi)
+
+  par(mar = c(5, 5, 4, 2))
+
+  hist(
+    values,
+    breaks = breaks_1khz,
+    xlim = c(fmin_khz, fmax_khz),
+    main = title,
+    xlab = "Frequency (kHz)",
+    ylab = "Number of extrema",
+    xaxt = "n"
+  )
+
+  axis(1, at = x_ticks)
+  dev.off()
+}
+
+# Extract values
+peak_vals <- liftered_tukey_event_extrema$frequency_khz[
+  liftered_tukey_event_extrema$extremum_type == "peak"
+]
+
+notch_vals <- liftered_tukey_event_extrema$frequency_khz[
+  liftered_tukey_event_extrema$extremum_type == "notch"
+]
+
+plot_histogram_to_file(
+  peak_vals,
+  paste(DriftID, "| Event", evNum, "| Liftered + Tukey Peaks"),
+  file.path(
+    eventHistDir,
+    sprintf("%s_Event_%03d_Liftered_Tukey_Peaks.png", DriftID, evNum)
+  )
+)
+
+plot_histogram_to_file(
+  notch_vals,
+  paste(DriftID, "| Event", evNum, "| Liftered + Tukey Notches"),
+  file.path(
+    eventHistDir,
+    sprintf("%s_Event_%03d_Liftered_Tukey_Notches.png", DriftID, evNum)
+  )
+)
+
+```
+
+### Bin data / sanity check
+
+```{r}
+
+peak_hist <- hist(peak_vals, breaks = breaks_1khz, plot = FALSE)
+notch_hist <- hist(notch_vals, breaks = breaks_1khz, plot = FALSE)
+
+peak_bin_table <- tibble(
+  bin_start_khz = breaks_1khz[-length(breaks_1khz)],
+  bin_end_khz   = breaks_1khz[-1],
+  n_peaks       = peak_hist$counts
+) |> dplyr::mutate(total_peaks = sum(n_peaks))
+
+notch_bin_table <- tibble(
+  bin_start_khz = breaks_1khz[-length(breaks_1khz)],
+  bin_end_khz   = breaks_1khz[-1],
+  n_notches     = notch_hist$counts
+) |> dplyr::mutate(total_notches = sum(n_notches))
+
+peak_bin_table
+notch_bin_table
+
+```
 
 
 

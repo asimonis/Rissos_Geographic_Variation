@@ -28,11 +28,11 @@ source(here('R','lifteredClickCalcs.R'))
 ```{r}
 ###USER-DEFINED FIELDS####
 baseDir <- 'E:/Analysis/'
-DriftID<-'ADRIFT_033'
+DriftID<-'ADRIFT_003'
 binFolder <- paste0(baseDir,'/Binaries/',DriftID)    #Folder with binaries
 
 # this database should be the cleaned copy
-db <- paste0(baseDir,'/Databases/',DriftID,' - Clean.sqlite3')
+db <- paste0(baseDir,'/Useable Databases/',DriftID,' - Clean.sqlite3')
 
 pps <- PAMpalSettings(db=db, 
                       binaries = binFolder,
