@@ -1,4 +1,4 @@
-﻿UTC,Latitude,Longitude,species,call,end,DriftName,gpsUncertainty,DataQuality
+UTC,Latitude,Longitude,species,call,end,DriftName,gpsUncertainty,DataQuality
 2021-07-26 04:06:00 UTC,37.98582657,-123.5024824,Gg,Clicks,2021-07-26 04:18:00 UTC,ADRIFT_003,68.79512277,compromised
 2021-07-30 12:28:28 UTC,38.03271748,-123.4764946,Gg,Clicks,2021-07-30 12:50:08 UTC,ADRIFT_003,2.381623902,compromised
 2021-07-27 13:28:30 UTC,38.12771518,-123.4485327,Gg,Clicks,2021-07-27 14:27:00 UTC,ADRIFT_006,11.29323476,compromised

@@ -26,8 +26,13 @@ here()
 
     ```{r, Set deployment metadata}
     ###USER-DEFINED FIELDS####
+<<<<<<< Updated upstream
     baseDir <- 'F:/Odontocetes/RissosGeographicVariation/'  
     DriftID<-'ADRIFT_033'
+=======
+    baseDir <- "E:/Analysis/"  
+    DriftID<-'ADRIFT_032'
+>>>>>>> Stashed changes
     binFolder <- paste0(baseDir,'Binaries/',DriftID)    #Folder with binaries
     # this database should be a COPY of the original because we will add events to it later
     db <- paste0(baseDir,'Databases/',DriftID,' - Copy.sqlite3')
