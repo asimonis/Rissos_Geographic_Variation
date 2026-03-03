@@ -18,7 +18,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 library("easypackages")
 libraries(
   "PAMpal","PAMmisc","dplyr","here","lubridate","purrr","signal","fs","stringr",
-  "tidyr","ggplot2","pracma","quantmod","tibble"
+  "tidyr","ggplot2","pracma","tibble"
 )
 
 source(here('R',"TukeySmoothing.R"))
@@ -29,14 +29,15 @@ source(here('R',"TukeySmoothing.R"))
 
 ```{r}
 
+
 # Base directories
 baseDir <- "E:/Analysis"
 extremaBaseDir <- file.path(baseDir, "Event Extrema")
 histBaseDir    <- file.path(baseDir, "Event Histograms")
 
 # Study identifiers
-DriftID <- "ADRIFT_003"
-evNum   <- 1
+DriftID <- "CCES_008"
+evNum   <- 10
 channel <- 1
 
 # Spectral parameters
@@ -62,9 +63,10 @@ img_dpi <- 300
 
 ```
 
-### Helper functions
+### Helper Functions
 
 ```{r}
+
 
 to_khz <- function(freq) {
   if (max(freq, na.rm = TRUE) > 1000) freq / 1000 else freq
@@ -97,19 +99,34 @@ detect_peaks_pracma <- function(y, freq_khz, fmin_khz, fmax_khz,
   if (is.null(peaks) || nrow(peaks) == 0) numeric(0) else x_band[peaks[, 2]]
 }
 
-detect_notches_quantmod <- function(y, freq_khz, fmin_khz, fmax_khz) {
+detect_notches_pracma_inverted <- function(y, freq_khz, fmin_khz, fmax_khz,
+                                          min_peak_separation_khz, peak_height_quantile) {
 
-  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y)
+  # Notches are valleys in y, i.e. peaks in -y
+  y_inv <- -y
+
+  band <- freq_khz >= fmin_khz & freq_khz <= fmax_khz & is.finite(y_inv)
   x_band <- freq_khz[band]
-  y_band <- y[band]
+  y_band <- y_inv[band]
 
   if (length(x_band) < 3) return(numeric(0))
 
-  idx <- quantmod::findValleys(y_band)
-  if (length(idx) == 0) return(numeric(0))
+  freq_resolution_khz <- median(diff(x_band), na.rm = TRUE)
+  min_peak_separation_bins <- max(
+    1, round(min_peak_separation_khz / freq_resolution_khz)
+  )
 
-  idx <- pmax(1, idx - 1)
-  x_band[idx]
+  min_peak_height_inv <- as.numeric(
+    quantile(y_band, probs = peak_height_quantile, na.rm = TRUE)
+  )
+
+  notches <- pracma::findpeaks(
+    y_band,
+    minpeakheight   = min_peak_height_inv,
+    minpeakdistance = min_peak_separation_bins
+  )
+
+  if (is.null(notches) || nrow(notches) == 0) numeric(0) else x_band[notches[, 2]]
 }
 
 ```
@@ -117,6 +134,7 @@ detect_notches_quantmod <- function(y, freq_khz, fmin_khz, fmax_khz) {
 ### Load Study
 
 ```{r}
+
 
 binFolder <- file.path(baseDir, "Binaries", DriftID)
 db <- file.path(
@@ -143,6 +161,7 @@ study <- processPgDetections(pps) |>
 
 ```{r}
 
+
 eventFolderName <- sprintf("Event_%03d", evNum)
 
 eventExtremaDir <- file.path(extremaBaseDir, DriftID, eventFolderName)
@@ -161,6 +180,7 @@ if (!dir.exists(eventHistDir)) {
 ### Tukey spectra
 
 ```{r}
+
 
 tukey_spectra <- calculateAverageSpectra_tukey(
   study,
@@ -181,9 +201,10 @@ if (is.null(n_clicks) || n_clicks == 0) {
 
 ```
 
-### Detect extrema (event-level)
+### Detect extrema (event_level)
 
 ```{r}
+
 
 tukey_event_extrema <- tibble(
   DriftID        = character(),
@@ -203,8 +224,9 @@ for (i in seq_len(n_clicks)) {
     min_peak_separation_khz, peak_height_quantile
   )
 
-  notches_khz <- detect_notches_quantmod(
-    y, freq_khz, fmin_khz, fmax_khz
+  notches_khz <- detect_notches_pracma_inverted(
+    y, freq_khz, fmin_khz, fmax_khz,
+    min_peak_separation_khz, peak_height_quantile
   )
 
   if (length(peaks_khz) > 0) {
@@ -244,7 +266,7 @@ extrema_counts
 
 ```
 
-### Save RDS
+### Save extrema RDS
 
 ```{r}
 
@@ -261,6 +283,7 @@ saveRDS(
 ### Histograms
 
 ```{r}
+
 
 # Common breaks and axis ticks (1 kHz)
 breaks_1khz <- seq(fmin_khz, fmax_khz, by = 1)
@@ -321,6 +344,7 @@ plot_histogram_to_file(
 
 ```{r}
 
+
 # Build histogram objects (no plotting)
 peak_hist <- hist(
   tukey_event_extrema$frequency_khz[
@@ -356,3 +380,16 @@ peak_bin_table
 notch_bin_table
 
 ```
+
+
+
+
+
+
+
+
+
+
+
+
+

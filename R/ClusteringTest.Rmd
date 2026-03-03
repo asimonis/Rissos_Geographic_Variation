@@ -1,0 +1,85 @@
+---
+title: "ClusteringTest"
+author: "Sarah Shiers"
+date: "2026-03-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This RMD exists to determine best methodology for clustering; extrema versus whole spectrum, kmeans versus k-shape versus hdbscan.
+
+```{r}
+
+library("easypackages")
+libraries("ggplot2", "dplyr", "PAMpal", "here")
+
+source(here('R',"TukeySmoothing.R"))
+
+```
+
+Load Data
+
+```{r}
+
+# Base directories
+baseDir <- "E:/Analysis"
+
+# Study identifiers
+DriftID <- "ADRIFT_003"
+evNum   <- 1
+channel <- 1
+
+study <- readRDS(paste0(baseDir,'/AcousticStudies/',DriftID,'_Gg_Clean.rds'))
+
+
+```
+
+Create and Save Spectra
+
+```{r}
+
+#Create output directories
+
+eventFolderName <- sprintf("Event_%03d", evNum)
+
+eventTukeySpectraDir <- file.path(baseDir, 'TukeySpectra', DriftID, eventFolderName)
+
+if (!dir.exists(eventTukeySpectraDir)) {
+  dir.create(eventTukeySpectraDir, recursive = TRUE)
+}
+
+# Spectral parameters
+wl <- 1024
+
+# Frequency band (kHz)
+fmin_khz <- 19
+fmax_khz <- 50
+
+# Tukey parameters
+tukeyMedian      <- 5
+tukeyHanningSize <- 5
+
+# Spectra
+tukey_spectra <- calculateAverageSpectra_tukey(
+  study,
+  evNum = evNum,
+  channel = channel,
+  tukeyMedian = tukeyMedian,
+  tukeyHanningSize = tukeyHanningSize,
+  plot = FALSE,
+  wl = wl
+)
+
+# Save RDS
+saveRDS(
+  tukey_spectra,
+  file.path(
+    eventTukeySpectraDir,
+    sprintf("%s_Event_%03d_Tukey_Spectra.rds", DriftID, evNum)
+  )
+)
+
+```
