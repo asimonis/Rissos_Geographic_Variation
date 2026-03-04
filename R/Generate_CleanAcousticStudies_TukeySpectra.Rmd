@@ -1,0 +1,93 @@
+---
+title: "Generate_CleanAcousticStudies_TukeySpectra"
+author: "Anne Simonis"
+date: "2026-03-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load R-packages and needed code
+
+```{r}
+library(PAMpal)
+library(dplyr)
+library(here)
+```
+
+## User-defined parameters
+
+```{r}
+# Base directories
+baseDir <- "E:/Analysis"
+
+# Study identifiers
+DriftID <- "CCES_008"
+evNum   <- 10
+channel <- 1
+
+# Spectral parameters
+wl <- 1024
+
+# Tukey parameters
+tukeyMedian      <- 5
+tukeyHanningSize <- 5
+```
+
+## Generate Clean Acoustic Studies
+
+```{r}
+binFolder <- file.path(baseDir, "Binaries", DriftID)
+db <- file.path(
+  baseDir,
+  "Useable Databases",
+  paste0(DriftID, " - Clean.sqlite3")
+)
+
+pps <- PAMpalSettings(
+  db = db,
+  binaries = binFolder,
+  sr_hz = "auto",
+  winLen_sec = 0.0025,
+  filterfrom_khz = 10,
+  filterto_khz = 80
+)
+
+study <- processPgDetections(pps)
+
+```
+
+## Generate and save Tukey Spectra for each event
+
+```{r}
+#Create output directories
+eventFolderName <- sprintf("Event_%03d", evNum)
+
+eventTukeySpectraDir <- file.path(baseDir, 'TukeySpectra', DriftID, eventFolderName)
+
+if (!dir.exists(eventTukeySpectraDir)) {
+  dir.create(eventTukeySpectraDir, recursive = TRUE)
+}
+
+tukey_spectra <- calculateAverageSpectra_tukey(
+  study,
+  evNum = evNum,
+  channel = channel,
+  tukeyMedian = tukeyMedian,
+  tukeyHanningSize = tukeyHanningSize,
+  plot = FALSE,
+  wl = wl
+)
+
+# Save RDS
+saveRDS(
+  tukey_spectra,
+  file.path(
+    eventTukeySpectraDir,
+    sprintf("%s_Event_%03d_Tukey_Spectra.rds", DriftID, evNum)
+  )
+)
+
+```

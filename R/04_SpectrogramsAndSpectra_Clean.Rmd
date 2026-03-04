@@ -5,7 +5,6 @@ date: "2025-09-25"
 output: html_document
 ---
 
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -36,7 +35,7 @@ here()
 2.  **Load in acoustic study from an RDS file and Gg times from log**
 
     ```{r, read acoustic study, include=FALSE}
-    
+
     #For generating new visuals use the following
              pps <- PAMpalSettings(db=db, 
                                   binaries = binFolder,
@@ -49,7 +48,7 @@ here()
         
             saveRDS(data, paste0(baseDir,'AcousticStudies/',DriftID,'_Gg_clean.rds'))
             beep()
-    
+
     # Double check warning messages
     print(getWarnings(data)$message)
 
@@ -77,7 +76,7 @@ data<-filter(data, peak>15 & duration<2000)
 ClickData<-getClickData(data)
 ```
 
-4. **Prepare and save spectra and spectrograms**
+4.  **Prepare and save spectra and spectrograms**
 
 ```{r}
 
