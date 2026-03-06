@@ -107,22 +107,26 @@ pps <- PAMpalSettings(
 
 study <- processPgDetections(pps)
 
-# Keep only Channel 1 detections in each event/detector
+# Keep only selected channel detections
 for (i in seq_along(study@events)) {
+  
   event_obj <- study@events[[i]]
   
   for (det_name in names(event_obj@detectors)) {
+    
     det_df <- event_obj@detectors[[det_name]]
     
     if (is.data.frame(det_df) && "Channel" %in% names(det_df)) {
-      event_obj@detectors[[det_name]] <- det_df[det_df$Channel == "1", , drop = FALSE]
+      event_obj@detectors[[det_name]] <- det_df[
+        det_df$Channel == as.character(channel),
+        ,
+        drop = FALSE
+      ]
     }
   }
   
   study@events[[i]] <- event_obj
 }
-
-study <- processPgDetections(pps)
 
 ```
 
