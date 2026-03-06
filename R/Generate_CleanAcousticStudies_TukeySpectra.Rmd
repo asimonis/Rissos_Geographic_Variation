@@ -5,27 +5,39 @@ date: "2026-03-04"
 output: html_document
 ---
 
+For a new event from the same drift run the following after generating a new clean acoustic study and running the script: 
+evNum <- 2
+source("Generate_TukeySpectra_only.R")
+
 ```{r setup, include=FALSE}
+
 knitr::opts_chunk$set(echo = TRUE)
+
 ```
 
 ## Load R-packages and needed code
 
 ```{r}
+
 library(PAMpal)
 library(dplyr)
 library(here)
+
 ```
 
 ## User-defined parameters
 
 ```{r}
+
 # Base directories
 baseDir <- "E:/Analysis"
 
+cleanStudyDir      <- file.path(baseDir, "CleanAcousticStudies")
+tukeySpectraBaseDir <- file.path(baseDir, "TukeySpectra")
+
 # Study identifiers
-DriftID <- "CCES_008"
-evNum   <- 10
+DriftID <- "ADRIFT_003"
+evNum   <- 1
 channel <- 1
 
 # Spectral parameters
@@ -34,17 +46,55 @@ wl <- 1024
 # Tukey parameters
 tukeyMedian      <- 5
 tukeyHanningSize <- 5
+
 ```
 
-## Generate Clean Acoustic Studies
+## Build file and folder paths
 
 ```{r}
+
+eventFolderName <- sprintf("Event_%03d", evNum) #run per event
+
 binFolder <- file.path(baseDir, "Binaries", DriftID)
+
 db <- file.path(
   baseDir,
   "Useable Databases",
   paste0(DriftID, " - Clean.sqlite3")
 )
+
+# Clean acoustic study path
+cleanStudyFile <- file.path(
+  cleanStudyDir,
+  sprintf("%s_CleanAcousticStudy.rds", DriftID)
+)
+ 
+# Tukey spectra path (run per event)
+eventTukeySpectraDir <- file.path(
+  tukeySpectraBaseDir,
+  DriftID,
+  eventFolderName
+)
+
+tukeySpectraFile <- file.path(
+  eventTukeySpectraDir,
+  sprintf("%s_Event_%03d_Tukey_Spectra.rds", DriftID, evNum)
+)
+
+```
+
+## Create output directories
+
+```{r}
+
+dir.create(cleanStudyDir, recursive = TRUE, showWarnings = FALSE)
+dir.create(eventTukeySpectraDir, recursive = TRUE, showWarnings = FALSE)
+
+```
+
+## Generate Clean Acoustic Study
+
+```{r}
 
 pps <- PAMpalSettings(
   db = db,
@@ -57,19 +107,36 @@ pps <- PAMpalSettings(
 
 study <- processPgDetections(pps)
 
+# Keep only Channel 1 detections in each event/detector
+for (i in seq_along(study@events)) {
+  event_obj <- study@events[[i]]
+  
+  for (det_name in names(event_obj@detectors)) {
+    det_df <- event_obj@detectors[[det_name]]
+    
+    if (is.data.frame(det_df) && "Channel" %in% names(det_df)) {
+      event_obj@detectors[[det_name]] <- det_df[det_df$Channel == "1", , drop = FALSE]
+    }
+  }
+  
+  study@events[[i]] <- event_obj
+}
+
+study <- processPgDetections(pps)
+
 ```
 
-## Generate and save Tukey Spectra for each event
+## Save Clean Acoustic Study
 
 ```{r}
-#Create output directories
-eventFolderName <- sprintf("Event_%03d", evNum)
 
-eventTukeySpectraDir <- file.path(baseDir, 'TukeySpectra', DriftID, eventFolderName)
+saveRDS(study, cleanStudyFile)
 
-if (!dir.exists(eventTukeySpectraDir)) {
-  dir.create(eventTukeySpectraDir, recursive = TRUE)
-}
+```
+
+## Generate Tukey Spectra
+
+```{r}
 
 tukey_spectra <- calculateAverageSpectra_tukey(
   study,
@@ -81,13 +148,18 @@ tukey_spectra <- calculateAverageSpectra_tukey(
   wl = wl
 )
 
-# Save RDS
-saveRDS(
-  tukey_spectra,
-  file.path(
-    eventTukeySpectraDir,
-    sprintf("%s_Event_%03d_Tukey_Spectra.rds", DriftID, evNum)
-  )
-)
+tukey_spectra$EventID <- sprintf("%s_Event_%03d", DriftID, evNum)
 
 ```
+
+## Save Tukey Spectra
+
+```{r}
+
+saveRDS(tukey_spectra, tukeySpectraFile)
+
+```
+
+
+
+

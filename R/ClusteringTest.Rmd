@@ -19,77 +19,23 @@ libraries("ggplot2", "dplyr", "PAMpal", "here","cluster")
 source(here('R',"TukeySmoothing.R"))
 
 ```
-
-Generate Clean Acoustic Studies
+Load in Tukey Spectra
 
 ```{r}
-# Base directories
-baseDir <- here()
 
-# Study identifiers
-DriftID <- "ADRIFT_033"
-evNum   <- 1
-channel <- 1
-
-study <- readRDS(paste0(baseDir,'/AcousticStudies/',DriftID,'_Gg_Clean.rds'))
-
-#Only keep detections from Channel 1
-study<-dplyr::filter(study,Channel==channel)
+Tukeyfile<-file.choose()
+tukey_spectra<-readRDS(Tukeyfile)
 
 ```
 
-Create and Save Spectra
-
-```{r}
-#Create output directories
-eventFolderName <- sprintf("Event_%03d", evNum)
-
-eventTukeySpectraDir <- file.path(baseDir, 'TukeySpectra', DriftID, eventFolderName)
-
-if (!dir.exists(eventTukeySpectraDir)) {
-  dir.create(eventTukeySpectraDir, recursive = TRUE)
-}
-
-# Spectral parameters
-wl <- 1024
-
-# Frequency band (kHz)
-fmin_khz <- 19
-fmax_khz <- 50
-
-# Tukey parameters
-tukeyMedian      <- 5
-tukeyHanningSize <- 5
-
-# Spectra
-tukey_spectra <- calculateAverageSpectra_tukey(
-  study,
-  evNum = evNum,
-  channel = channel,
-  tukeyMedian = tukeyMedian,
-  tukeyHanningSize = tukeyHanningSize,
-  plot = FALSE,
-  wl = wl
-)
-
-# Save RDS
-saveRDS(
-  tukey_spectra,
-  file.path(
-    eventTukeySpectraDir,
-    sprintf("%s_Event_%03d_Tukey_Spectra.rds", DriftID, evNum)
-  )
-)
-
-```
 
 To-Do:
 
--   Need to load in Tukey spectra from multiple events, and add an ID (like "ADRIFT_003_Event_001" to track spectra from each event.
+-   Need to load in Tukey spectra from multiple events
 
 -   Combine all of the spectra into a single matrix and then run the clustering
 
-----
+------------------------------------------------------------------------
 
 Reduce matrix of spectra to only keep frequencies between 19 - 50 kHz
 
@@ -99,7 +45,7 @@ keepFreq<-which(tukey_spectra$freq>=19000 & tukey_spectra$freq<= 50000)
 
 #Matrix with all click spectra 
 AllSpec_Focus<-tukey_spectra$allSpec[keepFreq,]
-AllSpec$freq<-tukey_spectra$freq[keepFreq]
+#AllSpec_Focus$freq<-tukey_spectra$freq[keepFreq]
 
 #Transpose matrix so each row represents one click and each column represents one spectrum
 AllSpec_Focus<-t(AllSpec_Focus)
@@ -115,7 +61,7 @@ Test K-Means clustering on spectra
 set.seed(1)
 
 #Run kmeans
-k=2
+k=3
 km<-kmeans(AllSpec_scale, k, nstart=50)
 d<-dist(AllSpec_scale,method="euclidean")
 
@@ -170,3 +116,6 @@ plot(1:15, wss, type = "b",
 
 
 ```
+
+
+
