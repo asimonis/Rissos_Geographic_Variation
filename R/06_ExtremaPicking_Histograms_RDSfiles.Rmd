@@ -36,8 +36,8 @@ extremaBaseDir <- file.path(baseDir, "Event Extrema")
 histBaseDir    <- file.path(baseDir, "Event Histograms")
 
 # Study identifiers
-DriftID <- "CCES_008"
-evNum   <- 10
+DriftID <- "ADRIFT_003"
+evNum   <- 1
 channel <- 1
 
 # Spectral parameters

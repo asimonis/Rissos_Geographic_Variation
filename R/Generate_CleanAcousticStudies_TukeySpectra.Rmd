@@ -38,7 +38,7 @@ cleanStudyDir      <- file.path(baseDir, "CleanAcousticStudies")
 tukeySpectraBaseDir <- file.path(baseDir, "TukeySpectra")
 
 # Study identifiers
-DriftID <- "ADRIFT_003"
+DriftID <- "ADRIFT_054"
 evNum   <- 1
 channel <- 1
 
@@ -146,6 +146,208 @@ tukey_spectra$EventID <- sprintf("%s_Event_%03d", DriftID, evNum)
 saveRDS(tukey_spectra, tukeySpectraFile)
 
 ```
+
+## Combined Tukey Spectra Prep
+
+```{r}
+
+# Recursively find all Tukey spectra RDS files
+tukey_files <- list.files(
+  path = tukeySpectraBaseDir,
+  pattern = "_Tukey_Spectra\\.rds$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+# Output file path
+combined_output_file <- file.path(tukeySpectraBaseDir, "Combined_Tukey_Spectra.rds")
+
+# Exclude combined output file if it already exists
+tukey_files <- tukey_files[basename(tukey_files) != "Combined_Tukey_Spectra.rds"]
+
+if (length(tukey_files) == 0) {
+  stop("No Tukey spectra RDS files were found in: ", tukeySpectraBaseDir)
+}
+
+# Function to parse EventID from filename
+parse_event_id <- function(filepath) {
+  
+  file_name <- basename(filepath)
+  
+  # Expected filename format:
+  # ADRIFT_003_Event_001_Tukey_Spectra.rds
+  match_obj <- regexec("^(.*_Event_\\d+)_Tukey_Spectra\\.rds$", file_name)
+  match_parts <- regmatches(file_name, match_obj)[[1]]
+  
+  if (length(match_parts) == 0) {
+    stop("Could not parse EventID from filename: ", filepath)
+  }
+  
+  match_parts[2]
+}
+
+cat("Number of Tukey spectra files found:", length(tukey_files), "\n")
+
+```
+
+## Reading, Annotating, and Storing Tukey Spectra
+
+```{r}
+
+tukey_list <- lapply(tukey_files, function(f) {
+  
+  event_id <- parse_event_id(f)
+  obj <- readRDS(f)
+  
+  if (!is.list(obj)) {
+    stop(
+      "This Tukey spectra file is not a list: ", f,
+      "\nClass found: ", paste(class(obj), collapse = ", ")
+    )
+  }
+  
+  # Force EventID to match filename
+  obj$EventID <- event_id
+  
+  # Keep file traceability
+  obj$SourceFile <- f
+  
+  obj
+})
+
+# Name each list entry by EventID
+names(tukey_list) <- vapply(tukey_list, function(x) x$EventID, character(1))
+
+cat("Successfully read", length(tukey_list), "Tukey spectra objects.\n")
+
+```
+
+## Build Combined Tukey Spectra Object
+
+```{r}
+
+Combined_Tukey_Spectra <- tukey_list
+
+cat("Combined_Tukey_Spectra object created as a named list.\n")
+
+```
+
+## Sanity Check: Summary Table
+
+```{r}
+
+combined_summary <- dplyr::bind_rows(
+  lapply(Combined_Tukey_Spectra, function(x) {
+    data.frame(
+      EventID = x$EventID,
+      NumUID = length(x$UID),
+      Length_freq = length(x$freq),
+      Length_avgSpec = length(x$avgSpec),
+      Dim_allSpec_rows = if (is.null(dim(x$allSpec))) NA_integer_ else dim(x$allSpec)[1],
+      Dim_allSpec_cols = if (is.null(dim(x$allSpec))) NA_integer_ else dim(x$allSpec)[2],
+      Length_avgNoise = length(x$avgNoise),
+      Dim_allNoise_rows = if (is.null(dim(x$allNoise))) NA_integer_ else dim(x$allNoise)[1],
+      Dim_allNoise_cols = if (is.null(dim(x$allNoise))) NA_integer_ else dim(x$allNoise)[2],
+      Length_snrKeep = length(x$snrKeep),
+      SourceFile = x$SourceFile,
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+print(combined_summary, n = Inf)
+
+```
+
+## Sanity Check: Consistency
+
+```{r}
+
+# Check that EventIDs are unique
+if (anyDuplicated(combined_summary$EventID) > 0) {
+  warning("Duplicate EventIDs found in Combined_Tukey_Spectra.")
+} else {
+  cat("EventID uniqueness check passed.\n")
+}
+
+# Check that number of columns in allSpec matches number of UIDs
+bad_allSpec <- combined_summary %>%
+  dplyr::filter(Dim_allSpec_cols != NumUID)
+
+if (nrow(bad_allSpec) > 0) {
+  warning("Some events have ncol(allSpec) != length(UID).")
+  print(bad_allSpec, n = Inf)
+} else {
+  cat("allSpec column count matches UID count for all events.\n")
+}
+
+# Check that number of columns in allNoise matches number of UIDs
+bad_allNoise <- combined_summary %>%
+  dplyr::filter(Dim_allNoise_cols != NumUID)
+
+if (nrow(bad_allNoise) > 0) {
+  warning("Some events have ncol(allNoise) != length(UID).")
+  print(bad_allNoise, n = Inf)
+} else {
+  cat("allNoise column count matches UID count for all events.\n")
+}
+
+# Check that snrKeep length matches UID count
+bad_snrKeep <- combined_summary %>%
+  dplyr::filter(Length_snrKeep != NumUID)
+
+if (nrow(bad_snrKeep) > 0) {
+  warning("Some events have length(snrKeep) != length(UID).")
+  print(bad_snrKeep, n = Inf)
+} else {
+  cat("snrKeep length matches UID count for all events.\n")
+}
+
+# Check that avgSpec and freq lengths match
+bad_avgSpec <- combined_summary %>%
+  dplyr::filter(Length_avgSpec != Length_freq)
+
+if (nrow(bad_avgSpec) > 0) {
+  warning("Some events have length(avgSpec) != length(freq).")
+  print(bad_avgSpec, n = Inf)
+} else {
+  cat("avgSpec length matches freq length for all events.\n")
+}
+
+# Check that avgNoise and freq lengths match
+bad_avgNoise <- combined_summary %>%
+  dplyr::filter(Length_avgNoise != Length_freq)
+
+if (nrow(bad_avgNoise) > 0) {
+  warning("Some events have length(avgNoise) != length(freq).")
+  print(bad_avgNoise, n = Inf)
+} else {
+  cat("avgNoise length matches freq length for all events.\n")
+}
+
+```
+
+## Save Combined Tukey Spectra
+
+```{r}
+
+saveRDS(Combined_Tukey_Spectra, combined_output_file)
+
+cat("Combined Tukey spectra saved to:\n", combined_output_file, "\n", sep = "")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
