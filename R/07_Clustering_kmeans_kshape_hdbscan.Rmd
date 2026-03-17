@@ -1,0 +1,538 @@
+---
+title: "Clustering_kmeans_kshape_hdbscan"
+author: "Sarah Shiers"
+date: "2026-03-16"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Overview
+
+This workflow prepares combined Tukey spectra for clustering by standardizing all events to a shared frequency grid, combining all click spectra into one matrix, and then running one selected clustering method.
+
+Current methods supported by the workflow structure:
+
+- kmeans
+
+- kshape (placeholder)
+
+- hdbscan (placeholder)
+
+Current method fully implemented:
+
+kmeans
+
+## Load Required Packages
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(cluster)
+
+```
+
+## User Settings
+
+```{r}
+
+cluster_method <- "kmeans"   # options: "kmeans", "kshape", "hdbscan"
+
+output_dir <- "E:/Analysis/Clustering_Output"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+freq_min <- 19000
+freq_max <- 50000
+
+# Candidate cluster numbers to evaluate for elbow plots
+k_candidates <- 2:15
+
+# Set after reviewing elbow plot
+chosen_k <- 5 # Use "NULL" prior
+
+# Sample sizes
+elbow_sample_size <- 20000
+eval_sample_size <- 5000
+
+```
+
+
+## Load Combined Tukey Spectra
+
+```{r}
+
+combined_file <- file.choose()
+combined_tukey <- readRDS(combined_file)
+
+class(combined_tukey)
+length(combined_tukey)
+
+```
+
+## Inspect Frequency Grids
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+
+freq_check <- data.frame(
+  EventID = character(),
+  SameAsReference = logical(),
+  LengthFreq = integer(),
+  FreqStep = numeric(),
+  MaxFreq = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(combined_tukey)) {
+  
+  current_freq <- combined_tukey[[i]]$freq
+  
+  freq_check <- rbind(
+    freq_check,
+    data.frame(
+      EventID = combined_tukey[[i]]$EventID,
+      SameAsReference = identical(current_freq, reference_freq),
+      LengthFreq = length(current_freq),
+      FreqStep = current_freq[2] - current_freq[1],
+      MaxFreq = max(current_freq),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+freq_check
+
+```
+
+## Choose Reference Frequency Grid
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+reference_event <- combined_tukey[[1]]$EventID
+
+cat("Reference event:", reference_event, "\n")
+cat("Reference frequency step:", reference_freq[2] - reference_freq[1], "Hz\n")
+cat("Reference max frequency:", max(reference_freq), "Hz\n")
+
+```
+
+## Interpolate Spectra to Shared Grid
+
+```{r}
+
+
+interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
+  
+  approx(
+    x = old_freq,
+    y = old_spec,
+    xout = new_freq,
+    method = "linear",
+    rule = 2
+  )$y
+  
+}
+
+interpolated_tukey <- vector("list", length(combined_tukey))
+
+for (i in seq_along(combined_tukey)) {
+  
+  tukey_spectra <- combined_tukey[[i]]
+  
+  old_freq <- tukey_spectra$freq
+  old_allSpec <- tukey_spectra$allSpec
+  
+  interpolated_allSpec <- apply(
+    old_allSpec,
+    2,
+    function(spec) interpolate_spectrum(old_freq, spec, reference_freq)
+  )
+  
+  interpolated_allSpec <- as.matrix(interpolated_allSpec)
+  
+  tukey_spectra$allSpec <- interpolated_allSpec
+  tukey_spectra$freq <- reference_freq
+  
+  interpolated_tukey[[i]] <- tukey_spectra
+  
+}
+
+```
+
+## Confirm Interpolation
+
+```{r}
+
+all_match_after_interp <- all(
+  sapply(interpolated_tukey, function(x) identical(x$freq, reference_freq))
+)
+
+all_match_after_interp
+
+```
+
+## Combine Spectra Across Events
+
+```{r}
+
+all_click_metadata <- list()
+all_click_spectra <- list()
+
+for (i in seq_along(interpolated_tukey)) {
+  
+  tukey_spectra <- interpolated_tukey[[i]]
+  
+  event_id <- tukey_spectra$EventID
+  uid <- tukey_spectra$UID
+  
+  click_spectra <- t(tukey_spectra$allSpec)
+  
+  click_meta <- data.frame(
+    EventID = event_id,
+    UID = uid,
+    stringsAsFactors = FALSE
+  )
+  
+  all_click_metadata[[i]] <- click_meta
+  all_click_spectra[[i]] <- click_spectra
+  
+}
+
+click_metadata <- do.call(rbind, all_click_metadata)
+all_spec_matrix <- do.call(rbind, all_click_spectra)
+
+dim(all_spec_matrix)
+
+```
+
+## Restrict Spectra to 19–50 kHz
+
+```{r}
+
+keepFreq <- which(reference_freq >= freq_min & reference_freq <= freq_max)
+
+AllSpec_Focus <- all_spec_matrix[, keepFreq]
+centroid_freq <- reference_freq[keepFreq]
+
+```
+
+## Scale Spectra
+
+```{r}
+
+AllSpec_scale <- scale(AllSpec_Focus)
+
+```
+
+## PCA for Scatterplot Visualization
+
+```{r}
+
+pca_result <- prcomp(AllSpec_scale)
+
+scatter_df <- data.frame(
+  PC1 = pca_result$x[,1],
+  PC2 = pca_result$x[,2],
+  EventID = click_metadata$EventID,
+  UID = click_metadata$UID
+)
+
+```
+
+## Determine Number of Clusters (Elbow Method)
+
+```{r}
+
+set.seed(1)
+
+elbow_sample_size <- min(elbow_sample_size, nrow(AllSpec_scale))
+
+elbow_index <- sample(
+  1:nrow(AllSpec_scale),
+  size = elbow_sample_size
+)
+
+AllSpec_elbow <- AllSpec_scale[elbow_index, ]
+
+wss <- numeric(length(k_candidates))
+
+for (i in seq_along(k_candidates)) {
+  
+  k <- k_candidates[i]
+  
+  km_tmp <- kmeans(
+    AllSpec_elbow,
+    centers = k,
+    nstart = 20,
+    algorithm = "Lloyd"
+  )
+  
+  wss[i] <- km_tmp$tot.withinss
+}
+
+elbow_df <- data.frame(
+  k = k_candidates,
+  WSS = wss
+)
+
+elbow_plot <- ggplot(elbow_df, aes(x = k, y = WSS)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Elbow Plot",
+    x = "Number of Clusters",
+    y = "Total Within SS"
+  )
+
+print(elbow_plot)
+
+ggsave(
+  filename = file.path(output_dir, "kmeans_elbow_plot.png"),
+  plot = elbow_plot,
+  width = 7,
+  height = 5
+)
+
+```
+
+## Confirm Chosen Number of Clusters
+
+```{r}
+
+if (is.null(chosen_k)) {
+  stop("Set chosen_k after reviewing the elbow plot before continuing.")
+}
+
+chosen_k
+
+```
+
+## Create Evaluation Sample
+
+This is the sample we will use for silhouette and scatterplot.  
+That is deliberate. Doing those on all 354k clicks is not sensible.
+
+```{r}
+
+set.seed(2)
+
+eval_sample_size <- min(eval_sample_size, nrow(AllSpec_scale))
+
+eval_index <- sample(
+  1:nrow(AllSpec_scale),
+  size = eval_sample_size
+)
+
+AllSpec_eval <- AllSpec_scale[eval_index, ]
+click_metadata_eval <- click_metadata[eval_index, ]
+
+```
+
+## Run Final k-means on Evaluation Sample
+
+```{r}
+
+if (cluster_method == "kmeans") {
+  
+  set.seed(3)
+  
+  km <- kmeans(
+    AllSpec_eval,
+    centers = chosen_k,
+    nstart = 50,
+    algorithm = "Lloyd"
+  )
+  
+  cluster_labels <- km$cluster
+}
+
+```
+
+## Evaluate Clustering with Mean Silhouette Score
+
+```{r}
+
+sil <- silhouette(cluster_labels, dist(AllSpec_eval))
+
+mean_silhouette <- mean(sil[, 3])
+
+mean_silhouette
+
+```
+
+## Silhouette Plot
+
+```{r}
+
+sil_df <- as.data.frame(sil) %>%
+  mutate(obs = row_number()) %>%
+  group_by(cluster) %>%
+  arrange(desc(sil_width), .by_group = TRUE) %>%
+  mutate(order = row_number()) %>%
+  ungroup()
+
+sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
+  geom_col() +
+  facet_wrap(~ cluster, scales = "free_x") +
+  labs(
+    title = paste("Silhouette Plot (k =", chosen_k, ")"),
+    x = "Observations",
+    y = "Silhouette Width"
+  )
+
+print(sil_plot)
+
+ggsave(
+  filename = file.path(output_dir, "kmeans_silhouette_plot.png"),
+  plot = sil_plot,
+  width = 8,
+  height = 5
+)
+
+```
+
+## Assign Cluster Labels
+
+```{r}
+
+click_metadata_eval$cluster <- cluster_labels
+
+head(click_metadata_eval)
+
+```
+
+## PCA Scatterplot of Clustered Clicks
+
+```{r}
+
+pca_eval <- prcomp(AllSpec_eval)
+
+scatter_df <- data.frame(
+  PC1 = pca_eval$x[, 1],
+  PC2 = pca_eval$x[, 2],
+  EventID = click_metadata_eval$EventID,
+  UID = click_metadata_eval$UID,
+  cluster = as.factor(cluster_labels)
+)
+
+scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  labs(
+    title = paste("Clustered Clicks (PCA Projection, k =", chosen_k, ")"),
+    x = "PC1",
+    y = "PC2",
+    color = "Cluster"
+  )
+
+print(scatter_plot)
+
+ggsave(
+  filename = file.path(output_dir, "kmeans_scatterplot.png"),
+  plot = scatter_plot,
+  width = 7,
+  height = 5
+)
+
+```
+
+## Plot Cluster Centroids
+
+```{r}
+
+centroid_file <- file.path(output_dir, "kmeans_centroid_plot.png")
+
+png(
+  filename = centroid_file,
+  width = 7,
+  height = 5,
+  units = "in",
+  res = 300
+)
+
+matplot(
+  x = centroid_freq / 1000,
+  y = t(km$centers),
+  type = "l",
+  lty = 1,
+  main = paste("Cluster Centroids (k =", chosen_k, ")"),
+  xlab = "Frequency (kHz)",
+  ylab = "Scaled Intensity"
+)
+
+dev.off()
+
+```
+
+## Save Centroid Spectra
+
+```{r}
+
+centroid_df <- data.frame(
+  Frequency_kHz = centroid_freq / 1000,
+  t(km$centers)
+)
+
+colnames(centroid_df) <- c(
+  "Frequency_kHz",
+  paste0("Cluster_", 1:chosen_k)
+)
+
+write.csv(
+  centroid_df,
+  file = file.path(output_dir, "kmeans_centroid_spectra.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Save Scatterplot Data
+
+```{r}
+
+write.csv(
+  scatter_df,
+  file = file.path(output_dir, "kmeans_scatterplot_data.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Save Summary Table
+
+```{r}
+
+summary_table <- data.frame(
+  Method = cluster_method,
+  ChosenK = chosen_k,
+  MeanSilhouette = mean_silhouette,
+  ElbowSampleSize = elbow_sample_size,
+  EvalSampleSize = eval_sample_size
+)
+
+summary_table
+
+write.csv(
+  summary_table,
+  file = file.path(output_dir, "kmeans_summary_table.csv"),
+  row.names = FALSE
+)
+
+```
+
+
+
+
+
+
+
+
+
+
+

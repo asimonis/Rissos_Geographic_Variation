@@ -31,7 +31,7 @@ tukey_spectra<-readRDS(Tukeyfile)
 
 To-Do:
 
--   Need to load in Tukey spectra from multiple events - make sure the EvventID is associated
+-   Need to load in Tukey spectra from multiple events - make sure the EventID is associated
 
 -   Combine all of the spectra into a single matrix and then run the clustering
 
