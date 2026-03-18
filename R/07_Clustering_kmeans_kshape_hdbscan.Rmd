@@ -55,9 +55,15 @@ k_candidates <- 2:15
 # Set after reviewing elbow plot
 chosen_k <- 5 # Use "NULL" prior
 
-# Sample sizes
-elbow_sample_size <- 20000
-eval_sample_size <- 5000
+# Sampling settings
+max_clicks_per_event <- 200
+
+# Optional caps after event-balanced sampling
+elbow_sample_cap <- 20000
+eval_sample_cap <- NULL
+
+# Whether to run final kmeans on all clicks
+run_kmeans_on_full_dataset <- TRUE
 
 ```
 
@@ -126,7 +132,6 @@ cat("Reference max frequency:", max(reference_freq), "Hz\n")
 ## Interpolate Spectra to Shared Grid
 
 ```{r}
-
 
 interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
   
@@ -227,22 +232,37 @@ centroid_freq <- reference_freq[keepFreq]
 
 ```{r}
 
-AllSpec_scale <- scale(AllSpec_Focus)
+# Row-wise scaling: emphasizes spectral shape within each click
+AllSpec_scale <- t(scale(t(AllSpec_Focus)))
+AllSpec_scale[is.na(AllSpec_scale)] <- 0
 
 ```
 
-## PCA for Scatterplot Visualization
+## Helper Function: Sample Up to N Clicks Per Event
 
 ```{r}
 
-pca_result <- prcomp(AllSpec_scale)
-
-scatter_df <- data.frame(
-  PC1 = pca_result$x[,1],
-  PC2 = pca_result$x[,2],
-  EventID = click_metadata$EventID,
-  UID = click_metadata$UID
-)
+sample_by_event <- function(metadata_df, max_per_event, seed = NULL, max_total = NULL) {
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  split_indices <- split(seq_len(nrow(metadata_df)), metadata_df$EventID)
+  
+  sampled_indices <- unlist(
+    lapply(split_indices, function(idx) {
+      sample(idx, size = min(length(idx), max_per_event))
+    }),
+    use.names = FALSE
+  )
+  
+  if (!is.null(max_total) && length(sampled_indices) > max_total) {
+    sampled_indices <- sample(sampled_indices, size = max_total)
+  }
+  
+  return(sampled_indices)
+}
 
 ```
 
@@ -250,13 +270,11 @@ scatter_df <- data.frame(
 
 ```{r}
 
-set.seed(1)
-
-elbow_sample_size <- min(elbow_sample_size, nrow(AllSpec_scale))
-
-elbow_index <- sample(
-  1:nrow(AllSpec_scale),
-  size = elbow_sample_size
+elbow_index <- sample_by_event(
+  metadata_df = click_metadata,
+  max_per_event = max_clicks_per_event,
+  seed = 1,
+  max_total = elbow_sample_cap
 )
 
 AllSpec_elbow <- AllSpec_scale[elbow_index, ]
@@ -300,6 +318,8 @@ ggsave(
   height = 5
 )
 
+cat("Elbow sample size used:", nrow(AllSpec_elbow), "\n")
+
 ```
 
 ## Confirm Chosen Number of Clusters
@@ -316,24 +336,44 @@ chosen_k
 
 ## Create Evaluation Sample
 
-This is the sample we will use for silhouette and scatterplot.  
-That is deliberate. Doing those on all 354k clicks is not sensible.
+This sample is used for silhouette and PCA scatterplot.
+It uses up to 200 clicks per event.
 
 ```{r}
 
-set.seed(2)
-
-eval_sample_size <- min(eval_sample_size, nrow(AllSpec_scale))
-
-eval_index <- sample(
-  1:nrow(AllSpec_scale),
-  size = eval_sample_size
+eval_index <- sample_by_event(
+  metadata_df = click_metadata,
+  max_per_event = max_clicks_per_event,
+  seed = 2,
+  max_total = NULL
 )
 
 AllSpec_eval <- AllSpec_scale[eval_index, ]
 click_metadata_eval <- click_metadata[eval_index, ]
 
+cat("Evaluation sample size used:", nrow(AllSpec_eval), "\n")
+
 ```
+
+## Sampling Diagnostics
+
+```{r}
+
+event_total <- click_metadata %>%
+  count(EventID, name = "total_clicks")
+
+event_sampled <- click_metadata_eval %>%
+  count(EventID, name = "sampled_clicks")
+
+sampling_table <- event_total %>%
+  left_join(event_sampled, by = "EventID") %>%
+  mutate(sampled_clicks = ifelse(is.na(sampled_clicks), 0, sampled_clicks)) %>%
+  arrange(EventID)
+
+sampling_table
+
+```
+
 
 ## Run Final k-means on Evaluation Sample
 
@@ -343,14 +383,33 @@ if (cluster_method == "kmeans") {
   
   set.seed(3)
   
-  km <- kmeans(
-    AllSpec_eval,
-    centers = chosen_k,
-    nstart = 50,
-    algorithm = "Lloyd"
-  )
-  
-  cluster_labels <- km$cluster
+  if (run_kmeans_on_full_dataset) {
+    
+    km <- kmeans(
+      AllSpec_scale,
+      centers = chosen_k,
+      nstart = 50,
+      algorithm = "Lloyd"
+    )
+    
+    cluster_labels_full <- km$cluster
+    click_metadata$cluster <- cluster_labels_full
+    
+    # Pull cluster labels for the evaluation subset
+    cluster_labels_eval <- cluster_labels_full[eval_index]
+    
+  } else {
+    
+    km <- kmeans(
+      AllSpec_eval,
+      centers = chosen_k,
+      nstart = 50,
+      algorithm = "Lloyd"
+    )
+    
+    cluster_labels_eval <- km$cluster
+    click_metadata_eval$cluster <- cluster_labels_eval
+  }
 }
 
 ```
@@ -359,11 +418,18 @@ if (cluster_method == "kmeans") {
 
 ```{r}
 
-sil <- silhouette(cluster_labels, dist(AllSpec_eval))
+sil <- silhouette(cluster_labels_eval, dist(AllSpec_eval))
 
 mean_silhouette <- mean(sil[, 3])
 
 mean_silhouette
+
+# Check other scores
+for (k in 3:6) {
+  km_test <- kmeans(AllSpec_eval, centers = k, nstart = 20)
+  sil <- silhouette(km_test$cluster, dist(AllSpec_eval))
+  cat("k =", k, "mean silhouette =", mean(sil[,3]), "\n")
+}
 
 ```
 
@@ -396,13 +462,16 @@ ggsave(
   height = 5
 )
 
+cat("Silhouette plot saved to:", 
+    file.path(output_dir, "kmeans_silhouette_plot.png"), "\n")
+
 ```
 
 ## Assign Cluster Labels
 
 ```{r}
 
-click_metadata_eval$cluster <- cluster_labels
+click_metadata_eval$cluster <- cluster_labels_eval
 
 head(click_metadata_eval)
 
@@ -419,7 +488,7 @@ scatter_df <- data.frame(
   PC2 = pca_eval$x[, 2],
   EventID = click_metadata_eval$EventID,
   UID = click_metadata_eval$UID,
-  cluster = as.factor(cluster_labels)
+  cluster = as.factor(cluster_labels_eval)
 )
 
 scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
@@ -438,6 +507,18 @@ ggsave(
   plot = scatter_plot,
   width = 7,
   height = 5
+)
+
+```
+
+## Save Scatterplot Data
+
+```{r}
+
+write.csv(
+  scatter_df,
+  file = file.path(output_dir, "kmeans_scatterplot_data.csv"),
+  row.names = FALSE
 )
 
 ```
@@ -492,18 +573,6 @@ write.csv(
 
 ```
 
-## Save Scatterplot Data
-
-```{r}
-
-write.csv(
-  scatter_df,
-  file = file.path(output_dir, "kmeans_scatterplot_data.csv"),
-  row.names = FALSE
-)
-
-```
-
 ## Save Summary Table
 
 ```{r}
@@ -512,8 +581,11 @@ summary_table <- data.frame(
   Method = cluster_method,
   ChosenK = chosen_k,
   MeanSilhouette = mean_silhouette,
-  ElbowSampleSize = elbow_sample_size,
-  EvalSampleSize = eval_sample_size
+  RunKmeansOnFullDataset = run_kmeans_on_full_dataset,
+  MaxClicksPerEvent = max_clicks_per_event,
+  ElbowSampleSizeUsed = nrow(AllSpec_elbow),
+  EvalSampleSizeUsed = nrow(AllSpec_eval),
+  TotalClicksInFullDataset = nrow(AllSpec_scale)
 )
 
 summary_table
@@ -523,6 +595,8 @@ write.csv(
   file = file.path(output_dir, "kmeans_summary_table.csv"),
   row.names = FALSE
 )
+
+dist(km$centers)
 
 ```
 

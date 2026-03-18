@@ -1,0 +1,670 @@
+---
+title: "Clustering_kmeans_compare_scaling"
+author: "Sarah Shiers"
+date: "2026-03-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Overview
+
+This workflow prepares combined Tukey spectra for clustering by standardizing all events to a shared frequency grid, combining all click spectra into one matrix, and then running k-means clustering under two different scaling approaches:
+
+old_scaling: column-wise scaling across all clicks
+
+new_scaling: row-wise scaling within each click
+
+The goal is to compare how the clustering results differ under these two preprocessing choices while keeping the rest of the workflow identical.
+
+## Load Required Packages
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(cluster)
+
+```
+
+## User Settings
+
+```{r}
+
+cluster_method <- "kmeans"   # options: "kmeans", "kshape", "hdbscan"
+
+output_dir <- "E:/Analysis/Clustering_Output"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+freq_min <- 19000
+freq_max <- 50000
+
+# Candidate cluster numbers to evaluate for elbow plots
+k_candidates <- 2:15
+
+# Set after reviewing elbow plots
+chosen_k <- 4   # use NULL before choosing
+
+# Sampling settings
+max_clicks_per_event <- 200
+
+# Optional cap after event-balanced sampling for elbow
+elbow_sample_cap <- 20000
+
+# Evaluation sample uses up to 200 clicks per event with no global cap
+eval_sample_cap <- NULL
+
+# Whether to run final kmeans on all clicks
+run_kmeans_on_full_dataset <- TRUE
+
+```
+
+## Load Combined Tukey Spectra
+
+```{r}
+
+combined_file <- file.choose()
+combined_tukey <- readRDS(combined_file)
+
+class(combined_tukey)
+length(combined_tukey)
+
+```
+
+## Inspect Frequency Grids
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+
+freq_check <- data.frame(
+  EventID = character(),
+  SameAsReference = logical(),
+  LengthFreq = integer(),
+  FreqStep = numeric(),
+  MaxFreq = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(combined_tukey)) {
+  
+  current_freq <- combined_tukey[[i]]$freq
+  
+  freq_check <- rbind(
+    freq_check,
+    data.frame(
+      EventID = combined_tukey[[i]]$EventID,
+      SameAsReference = identical(current_freq, reference_freq),
+      LengthFreq = length(current_freq),
+      FreqStep = current_freq[2] - current_freq[1],
+      MaxFreq = max(current_freq),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+freq_check
+
+```
+
+## Choose Reference Frequency Grid
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+reference_event <- combined_tukey[[1]]$EventID
+
+cat("Reference event:", reference_event, "\n")
+cat("Reference frequency step:", reference_freq[2] - reference_freq[1], "Hz\n")
+cat("Reference max frequency:", max(reference_freq), "Hz\n")
+
+```
+
+## Interpolate Spectra to Shared Grid
+
+```{r}
+
+interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
+  approx(
+    x = old_freq,
+    y = old_spec,
+    xout = new_freq,
+    method = "linear",
+    rule = 2
+  )$y
+}
+
+interpolated_tukey <- vector("list", length(combined_tukey))
+
+for (i in seq_along(combined_tukey)) {
+  
+  tukey_spectra <- combined_tukey[[i]]
+  
+  old_freq <- tukey_spectra$freq
+  old_allSpec <- tukey_spectra$allSpec
+  
+  interpolated_allSpec <- apply(
+    old_allSpec,
+    2,
+    function(spec) interpolate_spectrum(old_freq, spec, reference_freq)
+  )
+  
+  interpolated_allSpec <- as.matrix(interpolated_allSpec)
+  
+  tukey_spectra$allSpec <- interpolated_allSpec
+  tukey_spectra$freq <- reference_freq
+  
+  interpolated_tukey[[i]] <- tukey_spectra
+}
+
+```
+
+## Confirm Interolation
+
+```{r}
+
+all_match_after_interp <- all(
+  sapply(interpolated_tukey, function(x) identical(x$freq, reference_freq))
+)
+
+all_match_after_interp
+
+```
+
+## Combine Spectra Across Evvents
+
+```{r}
+
+all_click_metadata <- list()
+all_click_spectra <- list()
+
+for (i in seq_along(interpolated_tukey)) {
+  
+  tukey_spectra <- interpolated_tukey[[i]]
+  
+  event_id <- tukey_spectra$EventID
+  uid <- tukey_spectra$UID
+  
+  click_spectra <- t(tukey_spectra$allSpec)
+  
+  click_meta <- data.frame(
+    EventID = event_id,
+    UID = uid,
+    stringsAsFactors = FALSE
+  )
+  
+  all_click_metadata[[i]] <- click_meta
+  all_click_spectra[[i]] <- click_spectra
+}
+
+click_metadata <- do.call(rbind, all_click_metadata)
+all_spec_matrix <- do.call(rbind, all_click_spectra)
+
+dim(all_spec_matrix)
+
+```
+
+## Restrict Spectra to 19–50 kHz
+
+```{r}
+
+keepFreq <- which(reference_freq >= freq_min & reference_freq <= freq_max)
+
+AllSpec_Focus <- all_spec_matrix[, keepFreq]
+centroid_freq <- reference_freq[keepFreq]
+
+```
+
+## Create Both Scaling Versions
+
+```{r}
+
+AllSpec_scale_old <- scale(AllSpec_Focus)
+
+AllSpec_scale_new <- t(scale(t(AllSpec_Focus)))
+AllSpec_scale_new[is.na(AllSpec_scale_new)] <- 0
+
+scaled_data_list <- list(
+  old_scaling = AllSpec_scale_old,
+  new_scaling = AllSpec_scale_new
+)
+
+names(scaled_data_list)
+
+```
+
+## Helper Function: Sample Up to N Clicks Per Event
+
+```{r}
+
+sample_by_event <- function(metadata_df, max_per_event, seed = NULL, max_total = NULL) {
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  split_indices <- split(seq_len(nrow(metadata_df)), metadata_df$EventID)
+  
+  sampled_indices <- unlist(
+    lapply(split_indices, function(idx) {
+      sample(idx, size = min(length(idx), max_per_event))
+    }),
+    use.names = FALSE
+  )
+  
+  if (!is.null(max_total) && length(sampled_indices) > max_total) {
+    sampled_indices <- sample(sampled_indices, size = max_total)
+  }
+  
+  return(sampled_indices)
+}
+
+```
+
+## Create Shared Elbow and Evaluation Samples
+
+```{r}
+
+elbow_index <- sample_by_event(
+  metadata_df = click_metadata,
+  max_per_event = max_clicks_per_event,
+  seed = 1,
+  max_total = elbow_sample_cap
+)
+
+eval_index <- sample_by_event(
+  metadata_df = click_metadata,
+  max_per_event = max_clicks_per_event,
+  seed = 2,
+  max_total = eval_sample_cap
+)
+
+click_metadata_eval <- click_metadata[eval_index, ]
+
+cat("Elbow sample size used:", length(elbow_index), "\n")
+cat("Evaluation sample size used:", length(eval_index), "\n")
+
+```
+
+## Sampling Diagnostics
+
+```{r}
+
+event_total <- click_metadata %>%
+  count(EventID, name = "total_clicks")
+
+event_sampled <- click_metadata_eval %>%
+  count(EventID, name = "sampled_clicks")
+
+sampling_table <- event_total %>%
+  left_join(event_sampled, by = "EventID") %>%
+  mutate(sampled_clicks = ifelse(is.na(sampled_clicks), 0, sampled_clicks)) %>%
+  arrange(EventID)
+
+sampling_table
+
+write.csv(
+  sampling_table,
+  file = file.path(output_dir, "sampling_table_shared_across_scalings.csv"),
+  row.names = FALSE
+)
+
+```
+
+##Determine Number of Clusters (Elbow Method) for Both Scaling Approaches
+
+```{r}
+
+elbow_results <- list()
+
+for (scale_name in names(scaled_data_list)) {
+  
+  cat("\n------------------------------\n")
+  cat("Running elbow analysis for:", scale_name, "\n")
+  cat("------------------------------\n")
+  
+  AllSpec_scale_current <- scaled_data_list[[scale_name]]
+  AllSpec_elbow <- AllSpec_scale_current[elbow_index, ]
+  
+  wss <- numeric(length(k_candidates))
+  
+  for (i in seq_along(k_candidates)) {
+    
+    k <- k_candidates[i]
+    
+    km_tmp <- kmeans(
+      AllSpec_elbow,
+      centers = k,
+      nstart = 20,
+      algorithm = "Lloyd"
+    )
+    
+    wss[i] <- km_tmp$tot.withinss
+  }
+  
+  elbow_df <- data.frame(
+    k = k_candidates,
+    WSS = wss,
+    ScalingMethod = scale_name
+  )
+  
+  elbow_plot <- ggplot(elbow_df, aes(x = k, y = WSS)) +
+    geom_line() +
+    geom_point() +
+    labs(
+      title = paste("Elbow Plot -", scale_name),
+      x = "Number of Clusters",
+      y = "Total Within SS"
+    )
+  
+  print(elbow_plot)
+  
+  ggsave(
+    filename = file.path(output_dir, paste0("kmeans_elbow_plot_", scale_name, ".png")),
+    plot = elbow_plot,
+    width = 7,
+    height = 5
+  )
+  
+  write.csv(
+    elbow_df,
+    file = file.path(output_dir, paste0("kmeans_elbow_data_", scale_name, ".csv")),
+    row.names = FALSE
+  )
+  
+  elbow_results[[scale_name]] <- elbow_df
+}
+
+```
+
+## Confirm Chosen Number of Clusters
+
+```{r}
+
+if (is.null(chosen_k)) {
+  stop("Set chosen_k after reviewing BOTH elbow plots before continuing.")
+}
+
+chosen_k
+
+```
+
+## Run Full Analysis for Both Scaling Approaches
+
+```{r}
+
+results_list <- list()
+summary_rows <- list()
+silhouette_comparison_rows <- list()
+
+for (scale_name in names(scaled_data_list)) {
+  
+  cat("\n====================================\n")
+  cat("Running full analysis for:", scale_name, "\n")
+  cat("====================================\n")
+  
+  AllSpec_scale_current <- scaled_data_list[[scale_name]]
+  AllSpec_eval <- AllSpec_scale_current[eval_index, ]
+  
+  click_metadata_eval_current <- click_metadata_eval
+  
+  if (cluster_method == "kmeans") {
+    
+    set.seed(3)
+    
+    if (run_kmeans_on_full_dataset) {
+      
+      km <- kmeans(
+        AllSpec_scale_current,
+        centers = chosen_k,
+        nstart = 50,
+        algorithm = "Lloyd"
+      )
+      
+      cluster_labels_full <- km$cluster
+      cluster_labels_eval <- cluster_labels_full[eval_index]
+      
+      click_metadata_full_current <- click_metadata
+      click_metadata_full_current$cluster <- cluster_labels_full
+      
+    } else {
+      
+      km <- kmeans(
+        AllSpec_eval,
+        centers = chosen_k,
+        nstart = 50,
+        algorithm = "Lloyd"
+      )
+      
+      cluster_labels_eval <- km$cluster
+      
+      click_metadata_full_current <- NULL
+    }
+  }
+  
+  click_metadata_eval_current$cluster <- cluster_labels_eval
+  
+  current_dist <- dist(AllSpec_eval)
+  current_sil <- silhouette(cluster_labels_eval, current_dist)
+  mean_silhouette <- mean(current_sil[, 3])
+  
+  cat("Mean silhouette for", scale_name, "=", mean_silhouette, "\n")
+  
+  silhouette_k_rows <- list()
+  
+  for (k_test in 3:6) {
+    km_test <- kmeans(AllSpec_eval, centers = k_test, nstart = 20)
+    sil_test <- silhouette(km_test$cluster, current_dist)
+    silhouette_k_rows[[as.character(k_test)]] <- data.frame(
+      ScalingMethod = scale_name,
+      TestedK = k_test,
+      MeanSilhouette = mean(sil_test[, 3])
+    )
+    cat("Scaling =", scale_name, "| k =", k_test, "| mean silhouette =", mean(sil_test[, 3]), "\n")
+  }
+  
+  silhouette_k_df <- do.call(rbind, silhouette_k_rows)
+  
+  sil_df <- as.data.frame(current_sil) %>%
+    mutate(obs = row_number()) %>%
+    group_by(cluster) %>%
+    arrange(desc(sil_width), .by_group = TRUE) %>%
+    mutate(order = row_number()) %>%
+    ungroup()
+  
+  sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
+    geom_col() +
+    facet_wrap(~ cluster, scales = "free_x") +
+    labs(
+      title = paste("Silhouette Plot -", scale_name, "(k =", chosen_k, ")"),
+      x = "Observations",
+      y = "Silhouette Width"
+    )
+  
+  print(sil_plot)
+  
+  ggsave(
+    filename = file.path(output_dir, paste0("kmeans_silhouette_plot_", scale_name, ".png")),
+    plot = sil_plot,
+    width = 8,
+    height = 5
+  )
+  
+  pca_eval <- prcomp(AllSpec_eval)
+  
+  scatter_df <- data.frame(
+    PC1 = pca_eval$x[, 1],
+    PC2 = pca_eval$x[, 2],
+    EventID = click_metadata_eval_current$EventID,
+    UID = click_metadata_eval_current$UID,
+    cluster = as.factor(cluster_labels_eval),
+    ScalingMethod = scale_name
+  )
+  
+  scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
+    geom_point(alpha = 0.7, size = 1.2) +
+    labs(
+      title = paste("Clustered Clicks (PCA Projection) -", scale_name, "(k =", chosen_k, ")"),
+      x = "PC1",
+      y = "PC2",
+      color = "Cluster"
+    )
+  
+  print(scatter_plot)
+  
+  ggsave(
+    filename = file.path(output_dir, paste0("kmeans_scatterplot_", scale_name, ".png")),
+    plot = scatter_plot,
+    width = 7,
+    height = 5
+  )
+  
+  centroid_file <- file.path(output_dir, paste0("kmeans_centroid_plot_", scale_name, ".png"))
+  
+  png(
+    filename = centroid_file,
+    width = 7,
+    height = 5,
+    units = "in",
+    res = 300
+  )
+  
+  matplot(
+    x = centroid_freq / 1000,
+    y = t(km$centers),
+    type = "l",
+    lty = 1,
+    main = paste("Cluster Centroids -", scale_name, "(k =", chosen_k, ")"),
+    xlab = "Frequency (kHz)",
+    ylab = "Scaled Intensity"
+  )
+  
+  dev.off()
+  
+  centroid_df <- data.frame(
+    Frequency_kHz = centroid_freq / 1000,
+    t(km$centers)
+  )
+  
+  colnames(centroid_df) <- c(
+    "Frequency_kHz",
+    paste0("Cluster_", 1:chosen_k)
+  )
+  
+  centroid_distance_df <- as.matrix(dist(km$centers))
+  
+  write.csv(
+    scatter_df,
+    file = file.path(output_dir, paste0("kmeans_scatterplot_data_", scale_name, ".csv")),
+    row.names = FALSE
+  )
+  
+  write.csv(
+    centroid_df,
+    file = file.path(output_dir, paste0("kmeans_centroid_spectra_", scale_name, ".csv")),
+    row.names = FALSE
+  )
+  
+  write.csv(
+    centroid_distance_df,
+    file = file.path(output_dir, paste0("kmeans_centroid_distances_", scale_name, ".csv"))
+  )
+  
+  write.csv(
+    silhouette_k_df,
+    file = file.path(output_dir, paste0("kmeans_silhouette_k_comparison_", scale_name, ".csv")),
+    row.names = FALSE
+  )
+  
+  if (run_kmeans_on_full_dataset) {
+    write.csv(
+      click_metadata_full_current,
+      file = file.path(output_dir, paste0("kmeans_full_cluster_assignments_", scale_name, ".csv")),
+      row.names = FALSE
+    )
+  }
+  
+  results_list[[scale_name]] <- list(
+    km = km,
+    cluster_labels_eval = cluster_labels_eval,
+    click_metadata_eval = click_metadata_eval_current,
+    silhouette = current_sil,
+    mean_silhouette = mean_silhouette,
+    scatter_df = scatter_df,
+    centroid_df = centroid_df,
+    centroid_distances = centroid_distance_df,
+    silhouette_k_df = silhouette_k_df
+  )
+  
+  summary_rows[[scale_name]] <- data.frame(
+    ScalingMethod = scale_name,
+    Method = cluster_method,
+    ChosenK = chosen_k,
+    MeanSilhouette = mean_silhouette,
+    RunKmeansOnFullDataset = run_kmeans_on_full_dataset,
+    MaxClicksPerEvent = max_clicks_per_event,
+    ElbowSampleSizeUsed = length(elbow_index),
+    EvalSampleSizeUsed = length(eval_index),
+    TotalClicksInFullDataset = nrow(AllSpec_scale_current)
+  )
+  
+  silhouette_comparison_rows[[scale_name]] <- silhouette_k_df
+}
+
+```
+
+## Combined Summary Table
+
+```{r}
+
+summary_table <- do.call(rbind, summary_rows)
+
+summary_table
+
+write.csv(
+  summary_table,
+  file = file.path(output_dir, "kmeans_summary_table_all_scalings.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Combined Silhouette Comparison Table
+
+```{r}
+
+silhouette_comparison_table <- do.call(rbind, silhouette_comparison_rows)
+
+silhouette_comparison_table
+
+write.csv(
+  silhouette_comparison_table,
+  file = file.path(output_dir, "kmeans_silhouette_k_comparison_all_scalings.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Quick Direct Comparison of Mean Silhouette by Scaling Method
+
+```{r}
+
+summary_table %>%
+  select(ScalingMethod, ChosenK, MeanSilhouette)
+
+```
+
+
+
+
+
+
+
+
+
+
+
