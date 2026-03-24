@@ -43,7 +43,7 @@ library(cluster)
 
 cluster_method <- "kmeans"   # options: "kmeans", "kshape", "hdbscan"
 
-output_dir <- "E:/Analysis/Clustering_Output"
+output_dir <- "E:/Analysis/Clustering Output"
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 freq_min <- 19000
@@ -53,7 +53,8 @@ freq_max <- 50000
 k_candidates <- 2:15
 
 # Set after reviewing elbow plot
-chosen_k <- 5 # Use "NULL" prior
+chosen_k <- 3 # Use "NULL" prior
+k_label <- paste0("k_", chosen_k)
 
 # Sampling settings
 max_clicks_per_event <- 200
@@ -456,14 +457,14 @@ sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
 print(sil_plot)
 
 ggsave(
-  filename = file.path(output_dir, "kmeans_silhouette_plot.png"),
+  filename = file.path(output_dir, paste0("kmeans_silhouette_plot_", k_label, ".png")),
   plot = sil_plot,
   width = 8,
   height = 5
 )
 
 cat("Silhouette plot saved to:", 
-    file.path(output_dir, "kmeans_silhouette_plot.png"), "\n")
+    file.path(output_dir, paste0("kmeans_silhouette_plot_", k_label, ".png")), "\n")
 
 ```
 
@@ -503,7 +504,7 @@ scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
 print(scatter_plot)
 
 ggsave(
-  filename = file.path(output_dir, "kmeans_scatterplot.png"),
+  filename = file.path(output_dir, paste0("kmeans_scatterplot_", k_label, ".png")),
   plot = scatter_plot,
   width = 7,
   height = 5
@@ -517,7 +518,7 @@ ggsave(
 
 write.csv(
   scatter_df,
-  file = file.path(output_dir, "kmeans_scatterplot_data.csv"),
+  file = file.path(output_dir, paste0("kmeans_scatterplot_data_", k_label, ".csv")),
   row.names = FALSE
 )
 
@@ -527,7 +528,7 @@ write.csv(
 
 ```{r}
 
-centroid_file <- file.path(output_dir, "kmeans_centroid_plot.png")
+centroid_file <- file.path(output_dir, paste0("kmeans_centroid_plot_", k_label, ".png"))
 
 png(
   filename = centroid_file,
@@ -542,7 +543,7 @@ matplot(
   y = t(km$centers),
   type = "l",
   lty = 1,
-  main = paste("Cluster Centroids (k =", chosen_k, ")"),
+  main = paste("Cluster Centroids (", k_label, ")", sep = ""),
   xlab = "Frequency (kHz)",
   ylab = "Scaled Intensity"
 )
@@ -567,7 +568,7 @@ colnames(centroid_df) <- c(
 
 write.csv(
   centroid_df,
-  file = file.path(output_dir, "kmeans_centroid_spectra.csv"),
+  file = file.path(output_dir, paste0("kmeans_centroid_spectra_", k_label, ".csv")),
   row.names = FALSE
 )
 
@@ -579,6 +580,7 @@ write.csv(
 
 summary_table <- data.frame(
   Method = cluster_method,
+  KLabel = k_label,
   ChosenK = chosen_k,
   MeanSilhouette = mean_silhouette,
   RunKmeansOnFullDataset = run_kmeans_on_full_dataset,
@@ -592,7 +594,7 @@ summary_table
 
 write.csv(
   summary_table,
-  file = file.path(output_dir, "kmeans_summary_table.csv"),
+  file = file.path(output_dir, paste0("kmeans_summary_table_", k_label, ".csv")),
   row.names = FALSE
 )
 
