@@ -18,14 +18,10 @@ This workflow prepares combined Tukey spectra for clustering by standardizing al
 Current methods supported by the workflow structure:
 
 - kmeans
-
 - kshape (placeholder)
-
 - hdbscan (placeholder)
 
-Current method fully implemented:
-
-kmeans
+Current method fully implemented:kmeans
 
 ## Load Required Packages
 
@@ -419,18 +415,61 @@ if (cluster_method == "kmeans") {
 
 ```{r}
 
-sil <- silhouette(cluster_labels_eval, dist(AllSpec_eval))
+# Distance matrix for evaluation sample
+dist_eval <- dist(AllSpec_eval)
 
-mean_silhouette <- mean(sil[, 3])
+# Silhouette for the chosen k solution only
+sil_chosen <- silhouette(cluster_labels_eval, dist_eval)
+mean_silhouette <- mean(sil_chosen[, "sil_width"])
 
-mean_silhouette
+cat("Chosen k =", chosen_k, "mean silhouette =", mean_silhouette, "\n")
 
-# Check other scores
-for (k in 3:6) {
-  km_test <- kmeans(AllSpec_eval, centers = k, nstart = 20)
-  sil <- silhouette(km_test$cluster, dist(AllSpec_eval))
-  cat("k =", k, "mean silhouette =", mean(sil[,3]), "\n")
+# Check other candidate k values without overwriting sil_chosen
+silhouette_summary <- data.frame(
+  k = integer(),
+  mean_silhouette = numeric()
+)
+
+# Include chosen_k first
+silhouette_summary <- rbind(
+  silhouette_summary,
+  data.frame(
+    k = chosen_k,
+    mean_silhouette = mean_silhouette
+  )
+)
+
+# Evaluate other k values
+for (k in setdiff(2:6, chosen_k)) {
+  
+  set.seed(3)
+  
+  km_test <- kmeans(
+    AllSpec_eval,
+    centers = k,
+    nstart = 20,
+    iter.max = 100,
+    algorithm = "Lloyd"
+  )
+  
+  sil_test <- silhouette(km_test$cluster, dist_eval)
+  mean_sil_test <- mean(sil_test[, "sil_width"])
+  
+  silhouette_summary <- rbind(
+    silhouette_summary,
+    data.frame(
+      k = k,
+      mean_silhouette = mean_sil_test
+    )
+  )
+  
+  cat("k =", k, "mean silhouette =", mean_sil_test, "\n")
 }
+
+silhouette_summary <- silhouette_summary %>%
+  arrange(k)
+
+silhouette_summary
 
 ```
 
@@ -438,7 +477,7 @@ for (k in 3:6) {
 
 ```{r}
 
-sil_df <- as.data.frame(sil) %>%
+sil_df <- as.data.frame(sil_chosen) %>%
   mutate(obs = row_number()) %>%
   group_by(cluster) %>%
   arrange(desc(sil_width), .by_group = TRUE) %>%
@@ -463,8 +502,11 @@ ggsave(
   height = 5
 )
 
-cat("Silhouette plot saved to:", 
-    file.path(output_dir, paste0("kmeans_silhouette_plot_", k_label, ".png")), "\n")
+cat(
+  "Silhouette plot saved to:",
+  file.path(output_dir, paste0("kmeans_silhouette_plot_", k_label, ".png")),
+  "\n"
+)
 
 ```
 

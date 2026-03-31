@@ -104,9 +104,11 @@ Manual click cleaning removing clicks that were not Risso's
 
 Regeneration of concatenated spectrograms and spectra via R with the newly cleaned databases
 
-Liftering (?)
+Liftering (?) explored but didnt make an impact so chose not to use
 
-Smoothing (options Tukey and Hanning)
+Smoothing using Tukey and generated Tukey spectra for each event
+
+Histograms were created for
 
 ## C. Spatial Patterns in Click Feature Distribution
 

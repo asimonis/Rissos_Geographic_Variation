@@ -1,0 +1,830 @@
+---
+title: "Clustering_kshape"
+author: "Sarah Shiers"
+date: "2026-03-24"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+This workflow prepares combined Tukey spectra for clustering by standardizing all events to a shared frequency grid, combining all click spectra into one matrix, and then running k-shape clustering in a way that parallels the k-means workflow.
+
+This version:
+- interpolates all spectra to a shared frequency grid
+- restricts spectra to 19–50 kHz
+- applies row-wise scaling to emphasize spectral shape
+- uses an event-balanced sample for k-shape fitting and evaluation
+- compares candidate k values on the evaluation sample
+- fits one final k-shape model using the chosen k
+- assigns all clicks in the full dataset to the nearest learned k-shape centroid using SBD in batches
+- saves evaluation plots, centroid plots, centroid spectra, evaluation assignments, full-dataset assignments, and summary tables
+
+## Install Packages
+
+```{r}
+
+install.packages(c("ggplot2", "dplyr", "cluster", "dtwclust", "tidyr", "proxy"))
+
+```
+
+## Load Required Packages
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(cluster)
+library(dtwclust)
+library(tidyr)
+library(proxy)
+
+```
+
+## User Settings
+
+```{r}
+
+cluster_method <- "kshape"
+
+output_dir <- "E:/Analysis/Clustering Output"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+freq_min <- 19000
+freq_max <- 50000
+
+# Candidate k values to evaluate on the sample
+k_candidates <- 2:6
+
+# Set after reviewing summary metrics
+chosen_k <- 2
+k_label <- paste0("k_", chosen_k)
+
+# Sampling settings
+max_clicks_per_event <- 200
+eval_sample_cap <- NULL
+
+# Final k-shape fit settings
+kshape_nrep_eval <- 1L
+kshape_nrep_final <- 1L
+
+# Batch size for assigning full dataset to learned centroids
+assignment_batch_size <- 5000
+
+k_candidates <- c(2)
+chosen_k <- 2
+kshape_nrep_eval <- 1L
+kshape_nrep_final <- 1L
+
+```
+
+## Load Combined Tukey Spectra
+
+```{r}
+
+combined_file <- file.choose()
+combined_tukey <- readRDS(combined_file)
+
+class(combined_tukey)
+length(combined_tukey)
+
+```
+
+## Inspect Frequency Grids
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+
+freq_check <- data.frame(
+  EventID = character(),
+  SameAsReference = logical(),
+  LengthFreq = integer(),
+  FreqStep = numeric(),
+  MaxFreq = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(combined_tukey)) {
+  
+  current_freq <- combined_tukey[[i]]$freq
+  
+  freq_check <- rbind(
+    freq_check,
+    data.frame(
+      EventID = combined_tukey[[i]]$EventID,
+      SameAsReference = identical(current_freq, reference_freq),
+      LengthFreq = length(current_freq),
+      FreqStep = current_freq[2] - current_freq[1],
+      MaxFreq = max(current_freq),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+freq_check
+
+```
+
+## Choose Reference Frequency Grid
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+reference_event <- combined_tukey[[1]]$EventID
+
+cat("Reference event:", reference_event, "\n")
+cat("Reference frequency step:", reference_freq[2] - reference_freq[1], "Hz\n")
+cat("Reference max frequency:", max(reference_freq), "Hz\n")
+
+```
+
+## Interpolate Spectra to Shared Grid
+
+```{r}
+
+interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
+  approx(
+    x = old_freq,
+    y = old_spec,
+    xout = new_freq,
+    method = "linear",
+    rule = 2
+  )$y
+}
+
+interpolated_tukey <- vector("list", length(combined_tukey))
+
+for (i in seq_along(combined_tukey)) {
+  
+  current_event <- combined_tukey[[i]]
+  old_freq <- current_event$freq
+  old_allSpec <- current_event$allSpec
+  
+  if (length(old_freq) == nrow(old_allSpec)) {
+    
+    interpolated_allSpec <- apply(
+      old_allSpec,
+      2,
+      function(spec) interpolate_spectrum(old_freq, spec, reference_freq)
+    )
+    
+  } else if (length(old_freq) == ncol(old_allSpec)) {
+    
+    interpolated_allSpec <- t(apply(
+      old_allSpec,
+      1,
+      function(spec) interpolate_spectrum(old_freq, spec, reference_freq)
+    ))
+    
+  } else {
+    
+    stop(
+      paste0(
+        "Frequency length does not match either dimension of allSpec for EventID: ",
+        current_event$EventID,
+        " | length(freq) = ", length(old_freq),
+        " | dim(allSpec) = ", paste(dim(old_allSpec), collapse = " x ")
+      )
+    )
+  }
+  
+  interpolated_allSpec <- as.matrix(interpolated_allSpec)
+  
+  interpolated_tukey[[i]] <- list(
+    EventID = current_event$EventID,
+    UID = current_event$UID,
+    freq = reference_freq,
+    allSpec = interpolated_allSpec
+  )
+}
+
+```
+
+## Confrim Interpolation
+
+```{r}
+
+all_match_after_interp <- all(
+  sapply(interpolated_tukey, function(x) identical(x$freq, reference_freq))
+)
+
+all_match_after_interp
+
+```
+
+## Combine Spectra Across Events
+
+```{r}
+
+all_click_metadata <- list()
+all_click_spectra <- list()
+
+for (i in seq_along(interpolated_tukey)) {
+  
+  tukey_spectra <- interpolated_tukey[[i]]
+  
+  event_id <- tukey_spectra$EventID
+  uid <- tukey_spectra$UID
+  
+  click_spectra <- t(tukey_spectra$allSpec)
+  
+  click_meta <- data.frame(
+    EventID = event_id,
+    UID = uid,
+    stringsAsFactors = FALSE
+  )
+  
+  all_click_metadata[[i]] <- click_meta
+  all_click_spectra[[i]] <- click_spectra
+}
+
+click_metadata <- do.call(rbind, all_click_metadata)
+all_spec_matrix <- do.call(rbind, all_click_spectra)
+
+dim(all_spec_matrix)
+
+```
+
+## Restrict Spectra to 19–50 kHz
+
+```{r}
+
+keepFreq <- which(reference_freq >= freq_min & reference_freq <= freq_max)
+
+AllSpec_Focus <- all_spec_matrix[, keepFreq]
+centroid_freq <- reference_freq[keepFreq]
+
+```
+
+## Scale Spectra
+
+```{r}
+
+# Row-wise scaling emphasizes spectral shape within each click
+AllSpec_scale <- t(scale(t(AllSpec_Focus)))
+AllSpec_scale[is.na(AllSpec_scale)] <- 0
+
+```
+
+## Helper Function: Sample Up to N Clicks Per Event
+
+```{r}
+
+sample_by_event <- function(metadata_df, max_per_event, seed = NULL, max_total = NULL) {
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  split_indices <- split(seq_len(nrow(metadata_df)), metadata_df$EventID)
+  
+  sampled_indices <- unlist(
+    lapply(split_indices, function(idx) {
+      sample(idx, size = min(length(idx), max_per_event))
+    }),
+    use.names = FALSE
+  )
+  
+  if (!is.null(max_total) && length(sampled_indices) > max_total) {
+    sampled_indices <- sample(sampled_indices, size = max_total)
+  }
+  
+  return(sampled_indices)
+}
+sample_by_event <- function(metadata_df, max_per_event, seed = NULL, max_total = NULL) {
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  split_indices <- split(seq_len(nrow(metadata_df)), metadata_df$EventID)
+  
+  sampled_indices <- unlist(
+    lapply(split_indices, function(idx) {
+      sample(idx, size = min(length(idx), max_per_event))
+    }),
+    use.names = FALSE
+  )
+  
+  return(sampled_indices)
+}
+```
+
+## Create Evaluation Sample
+
+```{r}
+
+eval_index <- sample_by_event(
+  metadata_df = click_metadata,
+  max_per_event = max_clicks_per_event,
+  seed = 2,
+  max_total = eval_sample_cap
+)
+
+AllSpec_eval <- AllSpec_scale[eval_index, ]
+click_metadata_eval <- click_metadata[eval_index, ]
+
+cat("Evaluation sample size used:", nrow(AllSpec_eval), "\n")
+
+```
+## Compute SBD Distance Matrix for Evaluation Sample
+
+```{r}
+
+cat("Computing SBD distance matrix for evaluation sample...\n")
+
+sbd_dist_eval <- proxy::dist(
+  x = AllSpec_eval,
+  method = "SBD"
+)
+
+```
+
+
+## Sampling Diagnostics
+
+```{r}
+
+event_total <- click_metadata %>%
+  count(EventID, name = "total_clicks")
+
+event_sampled <- click_metadata_eval %>%
+  count(EventID, name = "sampled_clicks")
+
+sampling_table <- event_total %>%
+  left_join(event_sampled, by = "EventID") %>%
+  mutate(sampled_clicks = ifelse(is.na(sampled_clicks), 0, sampled_clicks)) %>%
+  arrange(EventID)
+
+sampling_table
+
+```
+
+## Cluster Labelling
+
+```{r}
+
+get_cluster_labels <- function(obj) {
+  
+  # Case 1: labels stored directly in a list element
+  if (is.list(obj) && "cluster" %in% names(obj) && !is.null(obj$cluster)) {
+    return(as.integer(unlist(obj$cluster)))
+  }
+  
+  # Case 2: labels stored as clustering
+  if (is.list(obj) && "clustering" %in% names(obj) && !is.null(obj$clustering)) {
+    return(as.integer(unlist(obj$clustering)))
+  }
+  
+  # Case 3: dtwclust object nested inside a list
+  if (is.list(obj) && "obj" %in% names(obj) && !is.null(obj$obj)) {
+    
+    inner <- obj$obj
+    
+    if (is.list(inner) && "cluster" %in% names(inner) && !is.null(inner$cluster)) {
+      return(as.integer(unlist(inner$cluster)))
+    }
+    
+    if (isS4(inner)) {
+      if ("cluster" %in% slotNames(inner)) {
+        return(as.integer(methods::slot(inner, "cluster")))
+      }
+      if ("clustering" %in% slotNames(inner)) {
+        return(as.integer(methods::slot(inner, "clustering")))
+      }
+    }
+  }
+  
+  # Case 4: S4 object directly
+  if (isS4(obj)) {
+    if ("cluster" %in% slotNames(obj)) {
+      return(as.integer(methods::slot(obj, "cluster")))
+    }
+    if ("clustering" %in% slotNames(obj)) {
+      return(as.integer(methods::slot(obj, "clustering")))
+    }
+  }
+  
+  stop(
+    paste(
+      "Could not find cluster labels.",
+      "Check names(obj), class(obj), and str(obj, max.level = 2)."
+    )
+  )
+}
+
+```
+
+
+## Helper Functions for k-shape
+
+```{r}
+
+run_kshape_clustering <- function(data_matrix, k, seed = 3, nrep = 3L) {
+  
+  set.seed(seed)
+  
+  data_matrix <- as.matrix(data_matrix)
+  storage.mode(data_matrix) <- "double"
+  
+  if (anyNA(data_matrix)) {
+    stop("Input to k-shape contains NA values.")
+  }
+  
+  if (!all(is.finite(data_matrix))) {
+    stop("Input to k-shape contains non-finite values.")
+  }
+  
+  series_list <- lapply(seq_len(nrow(data_matrix)), function(i) {
+    as.numeric(data_matrix[i, ])
+  })
+  
+  clust <- dtwclust::tsclust(
+    series = series_list,
+    type = "partitional",
+    k = k,
+    preproc = dtwclust::zscore,
+    distance = "sbd",
+    centroid = "shape",
+    seed = seed,
+    trace = FALSE,
+    control = dtwclust::partitional_control(nrep = nrep)
+  )
+  
+  return(clust)
+}
+
+extract_kshape_centroids <- function(kshape_obj, freq_vector) {
+  
+  cents <- kshape_obj@centroids
+  
+  centroid_mat <- do.call(
+    rbind,
+    lapply(cents, function(x) as.numeric(x))
+  )
+  
+  centroid_df <- data.frame(
+    Frequency_kHz = freq_vector / 1000
+  )
+  
+  for (i in seq_len(nrow(centroid_mat))) {
+    centroid_df[[paste0("Cluster_", i)]] <- centroid_mat[i, ]
+  }
+  
+  return(centroid_df)
+}
+
+plot_centroids_kshape <- function(centroid_df, k) {
+  
+  centroid_long <- tidyr::pivot_longer(
+    centroid_df,
+    cols = starts_with("Cluster_"),
+    names_to = "Cluster",
+    values_to = "ScaledIntensity"
+  )
+  
+  ggplot(centroid_long, aes(x = Frequency_kHz, y = ScaledIntensity, color = Cluster)) +
+    geom_line(linewidth = 0.8) +
+    labs(
+      title = paste("k-shape Centroids (k =", k, ")"),
+      x = "Frequency (kHz)",
+      y = "Scaled Intensity",
+      color = "Cluster"
+    )
+}
+
+assign_to_kshape_centroids <- function(data_matrix, centroid_matrix, batch_size = 5000) {
+  
+  n <- nrow(data_matrix)
+  assignments <- integer(n)
+  
+  for (start_idx in seq(1, n, by = batch_size)) {
+    
+    end_idx <- min(start_idx + batch_size - 1, n)
+    batch <- data_matrix[start_idx:end_idx, , drop = FALSE]
+    
+    batch_assign <- apply(batch, 1, function(x) {
+      dists <- sapply(seq_len(nrow(centroid_matrix)), function(j) {
+        as.numeric(proxy::dist(
+          x = matrix(as.numeric(x), nrow = 1),
+          y = matrix(as.numeric(centroid_matrix[j, ]), nrow = 1),
+          method = "SBD"
+        ))
+      })
+      which.min(dists)
+    })
+    
+    assignments[start_idx:end_idx] <- batch_assign
+    
+    cat("Assigned rows", start_idx, "to", end_idx, "\n")
+  }
+  
+  return(assignments)
+}
+```
+
+## Evaluate Candidate k Values on the Evaluation Sample
+
+```{r}
+
+results_summary_list <- list()
+
+k <- chosen_k
+
+cat("\n============================\n")
+cat("Running k-shape for chosen k =", k, "\n")
+cat("============================\n")
+
+ks_eval_tmp <- run_kshape_clustering(
+  data_matrix = AllSpec_eval,
+  k = k,
+  seed = 100 + k,
+  nrep = kshape_nrep_eval
+)
+
+cluster_labels_tmp <- as.integer(predict(ks_eval_tmp))
+
+sil_tmp <- cluster::silhouette(cluster_labels_tmp, sbd_dist_eval)
+mean_silhouette <- mean(sil_tmp[, "sil_width"])
+
+results_summary_list[[paste0("k_", k)]] <- data.frame(
+  Method = cluster_method,
+  KLabel = paste0("k_", k),
+  K = k,
+  MeanSilhouette = mean_silhouette,
+  EvalSampleSizeUsed = nrow(AllSpec_eval),
+  TotalClicksInFullDataset = nrow(AllSpec_scale)
+)
+
+cat("k =", k, "mean silhouette =", mean_silhouette, "\n")
+
+summary_table_all_k <- do.call(rbind, results_summary_list)
+
+summary_table_all_k
+
+write.csv(
+  summary_table_all_k,
+  file = file.path(output_dir, "kshape_summary_table_all_k.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Confirm Chosen Number of Clusters
+
+```{r}
+
+if (is.null(chosen_k)) {
+  stop("Set chosen_k after reviewing the k-shape summary table before continuing.")
+}
+
+chosen_k
+
+```
+
+## Run Final k-shape on Evaluation Sample
+
+```{r}
+
+ks_final <- run_kshape_clustering(
+  data_matrix = AllSpec_eval,
+  k = chosen_k,
+  seed = 999,
+  nrep = kshape_nrep_final
+)
+
+cluster_labels_eval <- as.integer(predict(ks_final))
+click_metadata_eval$cluster <- cluster_labels_eval
+
+```
+
+## Final Mean Silhouette for Chosen k
+
+```{r}
+
+sil_final <- cluster::silhouette(cluster_labels_eval, sbd_dist_eval)
+mean_silhouette_final <- mean(sil_final[, "sil_width"])
+
+cat("Chosen k =", chosen_k, "mean silhouette =", mean_silhouette_final, "\n")
+
+```
+
+## PCA Scatterplot of Clustered Evaluation Sample
+
+```{r}
+
+pca_eval <- prcomp(AllSpec_eval)
+
+scatter_df <- data.frame(
+  PC1 = pca_eval$x[, 1],
+  PC2 = pca_eval$x[, 2],
+  EventID = click_metadata_eval$EventID,
+  UID = click_metadata_eval$UID,
+  cluster = as.factor(cluster_labels_eval)
+)
+
+scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  labs(
+    title = paste("k-shape Clustered Clicks (PCA Projection,", k_label, ")"),
+    x = "PC1",
+    y = "PC2",
+    color = "Cluster"
+  )
+
+print(scatter_plot)
+
+ggsave(
+  filename = file.path(output_dir, paste0("kshape_pca_scatterplot_", k_label, ".png")),
+  plot = scatter_plot,
+  width = 7,
+  height = 5
+)
+
+write.csv(
+  scatter_df,
+  file = file.path(output_dir, paste0("kshape_pca_scatterplot_data_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+## SBD-based MDS Plot of Clustered Evaluation Sample
+
+```{r}
+
+cat("Running MDS on precomputed SBD distance matrix...\n")
+
+mds_fit <- cmdscale(sbd_dist_eval, k = 2)
+
+mds_df <- data.frame(
+  Dim1 = mds_fit[, 1],
+  Dim2 = mds_fit[, 2],
+  EventID = click_metadata_eval$EventID,
+  UID = click_metadata_eval$UID,
+  cluster = as.factor(cluster_labels_eval)
+)
+
+mds_plot <- ggplot(mds_df, aes(x = Dim1, y = Dim2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  labs(
+    title = paste("k-shape Clustered Clicks (SBD-based MDS,", k_label, ")"),
+    x = "MDS Dimension 1",
+    y = "MDS Dimension 2",
+    color = "Cluster"
+  )
+
+print(mds_plot)
+
+ggsave(
+  filename = file.path(output_dir, paste0("kshape_mds_scatterplot_", k_label, ".png")),
+  plot = mds_plot,
+  width = 7,
+  height = 5
+)
+
+write.csv(
+  mds_df,
+  file = file.path(output_dir, paste0("kshape_mds_scatterplot_data_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+
+## Plot Cluster Centroids
+
+```{r}
+
+centroid_df <- extract_kshape_centroids(ks_final, centroid_freq)
+
+centroid_plot <- plot_centroids_kshape(centroid_df, chosen_k)
+print(centroid_plot)
+
+ggsave(
+  filename = file.path(output_dir, paste0("kshape_centroid_plot_", k_label, ".png")),
+  plot = centroid_plot,
+  width = 7,
+  height = 5
+)
+
+write.csv(
+  centroid_df,
+  file = file.path(output_dir, paste0("kshape_centroid_spectra_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+## Save Evaluation Assignments
+
+```{r}
+
+write.csv(
+  click_metadata_eval,
+  file = file.path(output_dir, paste0("kshape_eval_cluster_assignments_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+## Assign Full Dataset to Learned Centroids in Batches
+
+```{r}
+
+centroid_matrix <- t(as.matrix(centroid_df[, -1]))
+
+cluster_labels_full <- assign_to_kshape_centroids(
+  data_matrix = AllSpec_scale,
+  centroid_matrix = centroid_matrix,
+  batch_size = assignment_batch_size
+)
+
+click_metadata_full <- click_metadata
+click_metadata_full$cluster <- cluster_labels_full
+
+```
+
+## Save Full-Dataset Assignments
+
+```{r}
+
+write.csv(
+  click_metadata_full,
+  file = file.path(output_dir, paste0("kshape_full_cluster_assignments_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+## Save Final Summary Table
+
+```{r}
+
+summary_table_final <- data.frame(
+  Method = cluster_method,
+  KLabel = k_label,
+  ChosenK = chosen_k,
+  MeanSilhouette = mean_silhouette_final,
+  MaxClicksPerEvent = max_clicks_per_event,
+  EvalSampleSizeUsed = nrow(AllSpec_eval),
+  TotalClicksInFullDataset = nrow(AllSpec_scale),
+  AssignmentBatchSize = assignment_batch_size,
+  MDSBasedOn = "SBD"
+)
+
+summary_table_final
+
+write.csv(
+  summary_table_final,
+  file = file.path(output_dir, paste0("kshape_summary_table_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+## Solhouette Plot
+
+```{r}
+
+sil_df <- as.data.frame(sil_final) %>%
+  mutate(obs = row_number()) %>%
+  group_by(cluster) %>%
+  arrange(desc(sil_width), .by_group = TRUE) %>%
+  mutate(order = row_number()) %>%
+  ungroup()
+
+sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
+  geom_col() +
+  facet_wrap(~ cluster, scales = "free_x") +
+  labs(
+    title = paste("Silhouette Plot (k-shape,", k_label, ")"),
+    x = "Observations",
+    y = "Silhouette Width"
+  )
+
+print(sil_plot)
+
+ggsave(
+  filename = file.path(output_dir, paste0("kshape_silhouette_plot_", k_label, ".png")),
+  plot = sil_plot,
+  width = 8,
+  height = 5
+)
+
+write.csv(
+  sil_df,
+  file = file.path(output_dir, paste0("kshape_silhouette_plot_data_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+
+
+
+
