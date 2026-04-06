@@ -60,7 +60,7 @@ freq_max <- 50000
 k_candidates <- 2:6
 
 # Set after reviewing summary metrics
-chosen_k <- 2
+chosen_k <- 3
 k_label <- paste0("k_", chosen_k)
 
 # Sampling settings
@@ -74,10 +74,7 @@ kshape_nrep_final <- 1L
 # Batch size for assigning full dataset to learned centroids
 assignment_batch_size <- 5000
 
-k_candidates <- c(2)
-chosen_k <- 2
-kshape_nrep_eval <- 1L
-kshape_nrep_final <- 1L
+k_candidates <- c(3)
 
 ```
 
@@ -659,7 +656,7 @@ write.csv(
 
 cat("Running MDS on precomputed SBD distance matrix...\n")
 
-mds_fit <- cmdscale(sbd_dist_eval, k = 2)
+mds_fit <- cmdscale(sbd_dist_eval, k = 3)
 
 mds_df <- data.frame(
   Dim1 = mds_fit[, 1],
@@ -824,7 +821,146 @@ write.csv(
 
 ```
 
+##  Elbow-like Plot for k-shape Using Total Within-Cluster SBD Distance
 
+```{r}
+
+elbow_plot_k_candidates <- 2:6
+
+kshape_within_sbd <- numeric(length(elbow_plot_k_candidates))
+
+for (i in seq_along(elbow_plot_k_candidates)) {
+  
+  k <- elbow_plot_k_candidates[i]
+  
+  cat("\n============================\n")
+  cat("Running k-shape elbow-like evaluation for k =", k, "\n")
+  cat("============================\n")
+  
+  ks_tmp <- run_kshape_clustering(
+    data_matrix = AllSpec_eval,
+    k = k,
+    seed = 200 + k,
+    nrep = 1L
+  )
+  
+  cluster_labels_tmp <- as.integer(predict(ks_tmp))
+  centroid_df_tmp <- extract_kshape_centroids(ks_tmp, centroid_freq)
+  centroid_matrix_tmp <- t(as.matrix(centroid_df_tmp[, -1]))
+  
+  total_within_sbd <- 0
+  
+  for (j in seq_len(nrow(AllSpec_eval))) {
+    
+    cl <- cluster_labels_tmp[j]
+    
+    d_j <- as.numeric(proxy::dist(
+      x = matrix(AllSpec_eval[j, ], nrow = 1),
+      y = matrix(centroid_matrix_tmp[cl, ], nrow = 1),
+      method = "SBD"
+    ))
+    
+    total_within_sbd <- total_within_sbd + d_j
+  }
+  
+  kshape_within_sbd[i] <- total_within_sbd
+  
+  cat("k =", k, "total within-cluster SBD =", total_within_sbd, "\n")
+}
+
+kshape_elbow_df <- data.frame(
+  k = elbow_plot_k_candidates,
+  TotalWithinSBD = kshape_within_sbd
+)
+
+kshape_elbow_plot <- ggplot(kshape_elbow_df, aes(x = k, y = TotalWithinSBD)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Elbow-like Plot for k-shape",
+    x = "Number of Clusters",
+    y = "Total Within-Cluster SBD"
+  )
+
+print(kshape_elbow_plot)
+
+ggsave(
+  filename = file.path(output_dir, "kshape_elbow_like_plot.png"),
+  plot = kshape_elbow_plot,
+  width = 7,
+  height = 5
+)
+
+write.csv(
+  kshape_elbow_df,
+  file = file.path(output_dir, "kshape_elbow_like_plot_data.csv"),
+  row.names = FALSE
+)
+
+cat("Evaluation sample size used for k-shape elbow-like plot:", nrow(AllSpec_eval), "\n")
+
+
+```
+
+## Silhouette Scores for k=2:6 on Eval Sample
+
+```{r}
+
+silhouette_k_candidates <- 2:6
+
+# Silhouette for the chosen k solution only
+sil_chosen <- cluster::silhouette(cluster_labels_eval, sbd_dist_eval)
+mean_silhouette <- mean(sil_chosen[, "sil_width"])
+
+cat("Chosen k =", chosen_k, "mean silhouette =", mean_silhouette, "\n")
+
+# Check other candidate k values without overwriting sil_chosen
+silhouette_summary <- data.frame(
+  k = integer(),
+  mean_silhouette = numeric()
+)
+
+# Include chosen_k first
+silhouette_summary <- rbind(
+  silhouette_summary,
+  data.frame(
+    k = chosen_k,
+    mean_silhouette = mean_silhouette
+  )
+)
+
+# Evaluate other candidate k values
+for (k in setdiff(silhouette_k_candidates, chosen_k)) {
+  
+  ks_tmp <- run_kshape_clustering(
+    data_matrix = AllSpec_eval,
+    k = k,
+    seed = 300 + k,
+    nrep = 1L
+  )
+  
+  cluster_labels_tmp <- as.integer(predict(ks_tmp))
+  
+  sil_tmp <- cluster::silhouette(cluster_labels_tmp, sbd_dist_eval)
+  mean_sil_tmp <- mean(sil_tmp[, "sil_width"])
+  
+  silhouette_summary <- rbind(
+    silhouette_summary,
+    data.frame(
+      k = k,
+      mean_silhouette = mean_sil_tmp
+    )
+  )
+  
+  cat("k =", k, "mean silhouette =", mean_sil_tmp, "\n")
+}
+
+silhouette_summary <- silhouette_summary %>%
+  arrange(k)
+
+silhouette_summary
+
+```
 
 
 
