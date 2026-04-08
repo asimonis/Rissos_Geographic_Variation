@@ -1,0 +1,728 @@
+---
+title: "Clustering_HDBSCAN"
+author: "Sarah Shiers"
+date: "2026-04-07"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Load Required Packages
+
+```{r}
+
+required_packages <- c("ggplot2", "dplyr", "cluster", "dbscan")
+
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, repos = "https://cran.rstudio.com")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+```
+
+## User Settings
+
+```{r}
+
+cluster_method <- "hdbscan"   # options: "kmeans", "kshape", "hdbscan"
+
+output_dir <- "E:/Analysis/Clustering Output"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+freq_min <- 19000
+freq_max <- 50000
+
+# HDBSCAN settings
+hdbscan_minPts <- 5
+min_samples <- NULL   # leave NULL to use default behavior in hdbscan()
+
+# Sampling settings
+max_clicks_per_event <- 200
+
+# Optional caps after event-balanced sampling
+eval_sample_cap <- NULL
+
+# Whether to run final HDBSCAN on all clicks
+run_hdbscan_on_full_dataset <- FALSE
+
+hdbscan_label <- paste0("minPts_", hdbscan_minPts)
+
+hdb <- hdbscan(AllSpec_pca, minPts = hdbscan_minPts)
+
+```
+
+## Load COmbined Tukey Spectra
+
+```{r}
+
+combined_file <- file.choose()
+combined_tukey <- readRDS(combined_file)
+
+cat("Object class:", class(combined_tukey), "\n")
+cat("Number of events:", length(combined_tukey), "\n")
+
+if (length(combined_tukey) == 0) {
+  stop("combined_tukey is empty.")
+}
+
+required_fields <- c("freq", "allSpec", "EventID", "UID")
+
+for (i in seq_along(combined_tukey)) {
+  
+  missing_fields <- setdiff(required_fields, names(combined_tukey[[i]]))
+  
+  if (length(missing_fields) > 0) {
+    stop(
+      paste(
+        "Event", i, "is missing required fields:",
+        paste(missing_fields, collapse = ", ")
+      )
+    )
+  }
+}
+
+cat("Required fields confirmed for all events.\n")
+
+```
+
+## Inspect Frequency Grid
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+
+freq_check <- data.frame(
+  EventID = character(),
+  SameAsReference = logical(),
+  LengthFreq = integer(),
+  FreqStep = numeric(),
+  MaxFreq = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(combined_tukey)) {
+  
+  current_freq <- combined_tukey[[i]]$freq
+  
+  freq_check <- rbind(
+    freq_check,
+    data.frame(
+      EventID = combined_tukey[[i]]$EventID,
+      SameAsReference = identical(current_freq, reference_freq),
+      LengthFreq = length(current_freq),
+      FreqStep = current_freq[2] - current_freq[1],
+      MaxFreq = max(current_freq),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+freq_check
+
+
+```
+
+## Choose Reference Frequency Grid
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+reference_event <- combined_tukey[[1]]$EventID
+
+cat("Reference event:", reference_event, "\n")
+cat("Reference frequency step:", reference_freq[2] - reference_freq[1], "Hz\n")
+cat("Reference max frequency:", max(reference_freq), "Hz\n")
+
+```
+
+## Interpolate Spectra to Shared Grid
+
+```{r}
+
+interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
+  approx(
+    x = old_freq,
+    y = old_spec,
+    xout = new_freq,
+    method = "linear",
+    rule = 2
+  )$y
+}
+
+interpolated_tukey <- vector("list", length(combined_tukey))
+
+for (i in seq_along(combined_tukey)) {
+  
+  tukey_spectra <- combined_tukey[[i]]
+  
+  old_freq <- tukey_spectra$freq
+  old_allSpec <- tukey_spectra$allSpec
+  
+  interpolated_allSpec <- apply(
+    old_allSpec,
+    2,
+    function(spec) interpolate_spectrum(old_freq, spec, reference_freq)
+  )
+  
+  interpolated_allSpec <- as.matrix(interpolated_allSpec)
+  
+  tukey_spectra$allSpec <- interpolated_allSpec
+  tukey_spectra$freq <- reference_freq
+  
+  interpolated_tukey[[i]] <- tukey_spectra
+}
+
+```
+
+## Confirm Interpolation
+
+```{r}
+
+all_match_after_interp <- all(
+  sapply(interpolated_tukey, function(x) identical(x$freq, reference_freq))
+)
+
+cat("All frequency grids match reference after interpolation:", all_match_after_interp, "\n")
+
+if (!all_match_after_interp) {
+  stop("Interpolation failed: not all events match the reference frequency grid.")
+}
+
+```
+
+## Combine Spectra Across All Events
+
+```{r}
+
+all_click_metadata <- list()
+all_click_spectra <- list()
+
+for (i in seq_along(interpolated_tukey)) {
+  
+  tukey_spectra <- interpolated_tukey[[i]]
+  
+  event_id <- tukey_spectra$EventID
+  uid <- tukey_spectra$UID
+  
+  click_spectra <- t(tukey_spectra$allSpec)
+  
+  click_meta <- data.frame(
+    EventID = event_id,
+    UID = uid,
+    stringsAsFactors = FALSE
+  )
+  
+  all_click_metadata[[i]] <- click_meta
+  all_click_spectra[[i]] <- click_spectra
+}
+
+click_metadata <- do.call(rbind, all_click_metadata)
+all_spec_matrix <- do.call(rbind, all_click_spectra)
+
+cat("Combined spectra dimensions:", dim(all_spec_matrix)[1], "clicks x", dim(all_spec_matrix)[2], "frequency bins\n")
+cat("Combined metadata rows:", nrow(click_metadata), "\n")
+
+if (nrow(all_spec_matrix) != nrow(click_metadata)) {
+  stop("Mismatch between number of spectra rows and metadata rows.")
+}
+
+```
+
+## Restrict Spectra to 19-50 kHz
+
+```{r}
+
+keepFreq <- which(reference_freq >= freq_min & reference_freq <= freq_max)
+
+AllSpec_Focus <- all_spec_matrix[, keepFreq]
+centroid_freq <- reference_freq[keepFreq]
+
+cat("Frequency band retained:", 
+    min(centroid_freq), "to", max(centroid_freq), "Hz\n")
+
+cat("Focused spectra dimensions:",
+    dim(AllSpec_Focus)[1], "clicks x",
+    dim(AllSpec_Focus)[2], "frequency bins\n")
+
+```
+
+## Scale Spectra
+
+```{r}
+
+# Row-wise scaling: emphasizes spectral shape within each click
+AllSpec_scale <- t(scale(t(AllSpec_Focus)))
+AllSpec_scale[is.na(AllSpec_scale)] <- 0
+
+cat("Scaled spectra dimensions:",
+    dim(AllSpec_scale)[1], "clicks x",
+    dim(AllSpec_scale)[2], "frequency bins\n")
+
+cat("Number of NA values after replacement:",
+    sum(is.na(AllSpec_scale)), "\n")
+
+```
+
+## Helper Function: Sample Up to N Clicks Per Event
+
+```{r}
+
+sample_by_event <- function(metadata_df, max_per_event, seed = NULL, max_total = NULL) {
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  split_indices <- split(seq_len(nrow(metadata_df)), metadata_df$EventID)
+  
+  sampled_indices <- unlist(
+    lapply(split_indices, function(idx) {
+      sample(idx, size = min(length(idx), max_per_event))
+    }),
+    use.names = FALSE
+  )
+  
+  if (!is.null(max_total) && length(sampled_indices) > max_total) {
+    sampled_indices <- sample(sampled_indices, size = max_total)
+  }
+  
+  return(sampled_indices)
+}
+
+```
+
+## Create Evaluation Sample
+
+This sample is used for silhouette and PCA scatterplot.
+It uses up to 200 clicks per event.
+
+```{r}
+
+eval_index <- sample_by_event(
+  metadata_df = click_metadata,
+  max_per_event = max_clicks_per_event,
+  seed = 2,
+  max_total = eval_sample_cap
+)
+
+AllSpec_eval <- AllSpec_scale[eval_index, ]
+click_metadata_eval <- click_metadata[eval_index, ]
+
+cat("Evaluation sample size used:", nrow(AllSpec_eval), "\n")
+
+```
+
+## Sampling Diagnostics
+
+```{r}
+
+event_total <- click_metadata %>%
+  count(EventID, name = "total_clicks")
+
+event_sampled <- click_metadata_eval %>%
+  count(EventID, name = "sampled_clicks")
+
+sampling_table <- event_total %>%
+  left_join(event_sampled, by = "EventID") %>%
+  mutate(sampled_clicks = ifelse(is.na(sampled_clicks), 0, sampled_clicks)) %>%
+  arrange(EventID)
+
+sampling_table
+
+```
+
+## HDBSCAN Parameter Sweep on Evaluation Sample
+
+```{r}
+
+hdbscan_summary <- data.frame(
+  minPts = integer(),
+  n_clusters = integer(),
+  n_noise = integer(),
+  prop_noise = numeric()
+)
+
+for (mp in c(5, 10, 15, 20, 30)) {
+  
+  hdb_tmp <- hdbscan(AllSpec_eval, minPts = mp)
+  
+  n_clusters <- length(setdiff(unique(hdb_tmp$cluster), 0))
+  n_noise <- sum(hdb_tmp$cluster == 0)
+  prop_noise <- mean(hdb_tmp$cluster == 0)
+  
+  hdbscan_summary <- rbind(
+    hdbscan_summary,
+    data.frame(
+      minPts = mp,
+      n_clusters = n_clusters,
+      n_noise = n_noise,
+      prop_noise = prop_noise
+    )
+  )
+  
+  cat(
+    "minPts =", mp,
+    "| clusters =", n_clusters,
+    "| noise =", n_noise,
+    "| prop_noise =", round(prop_noise, 4), "\n"
+  )
+}
+
+hdbscan_summary
+
+```
+
+## PCA Reduction for HDBSCAN
+
+```{r}
+
+# Run PCA on the evaluation sample
+pca_model <- prcomp(AllSpec_eval, center = FALSE, scale. = FALSE)
+
+# Cumulative proportion of variance explained
+var_explained <- cumsum((pca_model$sdev^2) / sum(pca_model$sdev^2))
+
+# Keep the minimum number of PCs explaining at least 95% of the variance
+n_pcs <- which(var_explained >= 0.95)[1]
+
+AllSpec_pca <- pca_model$x[, 1:n_pcs, drop = FALSE]
+
+cat("PCs needed for 95% variance:", n_pcs, "\n")
+cat("PCA feature matrix dimensions:",
+    dim(AllSpec_pca)[1], "clicks x",
+    dim(AllSpec_pca)[2], "PCs\n")
+
+```
+
+## HDBSCAN Parameter Sweep on PCA Space
+
+```{r}
+
+hdbscan_pca_summary <- data.frame(
+  minPts = integer(),
+  n_clusters = integer(),
+  n_noise = integer(),
+  prop_noise = numeric()
+)
+
+for (mp in c(5, 10, 15, 20, 30)) {
+  
+  hdb_tmp <- hdbscan(AllSpec_pca, minPts = mp)
+  
+  n_clusters <- length(setdiff(unique(hdb_tmp$cluster), 0))
+  n_noise <- sum(hdb_tmp$cluster == 0)
+  prop_noise <- mean(hdb_tmp$cluster == 0)
+  
+  hdbscan_pca_summary <- rbind(
+    hdbscan_pca_summary,
+    data.frame(
+      minPts = mp,
+      n_clusters = n_clusters,
+      n_noise = n_noise,
+      prop_noise = prop_noise
+    )
+  )
+  
+  cat(
+    "minPts =", mp,
+    "| clusters =", n_clusters,
+    "| noise =", n_noise,
+    "| prop_noise =", round(prop_noise, 4), "\n"
+  )
+}
+
+hdbscan_pca_summary
+
+```
+
+## Run Final HDBSCAN on PCA Space
+
+```{r}
+
+hdb <- hdbscan(
+  AllSpec_pca,
+  minPts = 5
+)
+
+cluster_labels_eval <- hdb$cluster
+click_metadata_eval$cluster <- cluster_labels_eval
+
+n_clusters <- length(setdiff(unique(cluster_labels_eval), 0))
+n_noise <- sum(cluster_labels_eval == 0)
+prop_noise <- mean(cluster_labels_eval == 0)
+
+cat("Clusters found:", n_clusters, "\n")
+cat("Noise points:", n_noise, "\n")
+cat("Noise proportion:", round(prop_noise, 4), "\n")
+
+```
+
+## PCA Scatterplot of HDBSCAN Clusters
+
+```{r}
+
+scatter_df <- data.frame(
+  PC1 = AllSpec_pca[,1],
+  PC2 = AllSpec_pca[,2],
+  EventID = click_metadata_eval$EventID,
+  UID = click_metadata_eval$UID,
+  cluster = as.factor(cluster_labels_eval)
+)
+
+scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  labs(
+    title = "HDBSCAN Clusters (PCA Space)",
+    x = "PC1",
+    y = "PC2",
+    color = "Cluster"
+  )
+
+print(scatter_plot)
+
+ggsave(
+  filename = file.path(output_dir, paste0("hdbscan_scatterplot_", hdbscan_label, ".png")),
+  plot = scatter_plot,
+  width = 7,
+  height = 5
+)
+
+```
+
+## Spectral Density Structure Diagnostic
+
+```{r}
+
+density_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2)) +
+  stat_density_2d(
+    aes(fill = after_stat(level)),
+    geom = "polygon",
+    alpha = 0.6
+  ) +
+  scale_fill_viridis_c() +
+  labs(
+    title = "Spectral Density Structure (PCA Space)",
+    x = "PC1",
+    y = "PC2",
+    fill = "Density"
+  )
+
+print(density_plot)
+
+ggsave(
+  filename = file.path(output_dir, paste0("hdbscan_pca_density_structure_", hdbscan_label, ".png")),
+  plot = density_plot,
+  width = 7,
+  height = 5
+)
+```
+
+## Compute Mean Spectra for HDBSCAN Clusters
+
+```{r}
+
+# Keep only non-noise points for cluster mean spectra
+clustered_idx <- which(cluster_labels_eval != 0)
+
+clustered_spectra <- AllSpec_eval[clustered_idx, , drop = FALSE]
+clustered_labels <- cluster_labels_eval[clustered_idx]
+
+cluster_mean_spectra <- aggregate(
+  clustered_spectra,
+  by = list(cluster = clustered_labels),
+  FUN = mean
+)
+
+cluster_ids <- cluster_mean_spectra$cluster
+cluster_mean_matrix <- as.matrix(cluster_mean_spectra[, -1])
+
+cat("Clusters included in mean spectra:", paste(cluster_ids, collapse = ", "), "\n")
+cat("Mean spectra matrix dimensions:",
+    dim(cluster_mean_matrix)[1], "clusters x",
+    dim(cluster_mean_matrix)[2], "frequency bins\n")
+
+```
+
+## Plot Mean Spectra for HDBSCAN Clusters
+
+```{r}
+
+cluster_ids <- as.numeric(cluster_ids)
+
+centroid_file <- file.path(
+  output_dir,
+  paste0("hdbscan_mean_spectra_", hdbscan_label, ".png")
+)
+
+png(
+  filename = centroid_file,
+  width = 7,
+  height = 5,
+  units = "in",
+  res = 300
+)
+
+matplot(
+  x = centroid_freq / 1000,
+  y = t(cluster_mean_matrix),
+  type = "l",
+  lty = 1,
+  lwd = 2,
+  main = "Mean Standardized Spectral Profiles by HDBSCAN Cluster",
+  xlab = "Frequency (kHz)",
+  ylab = "Standardized Intensity"
+)
+
+legend(
+  "topright",
+  legend = paste("Cluster", cluster_ids),
+  col = 1:length(cluster_ids),
+  lty = 1,
+  lwd = 2
+)
+
+dev.off()
+
+```
+
+## Evaluate HDBSCAN with Mean Silhouette Score
+
+```{r}
+
+sil_idx <- which(cluster_labels_eval != 0)
+
+if (length(unique(cluster_labels_eval[sil_idx])) < 2) {
+  cat("Silhouette not computed: fewer than 2 non-noise clusters.\n")
+} else {
+  
+  dist_eval_pca <- dist(AllSpec_pca[sil_idx, , drop = FALSE])
+  
+  sil_hdb <- silhouette(cluster_labels_eval[sil_idx], dist_eval_pca)
+  mean_silhouette <- mean(sil_hdb[, "sil_width"])
+  
+  cat("Mean silhouette (non-noise points only) =", mean_silhouette, "\n")
+}
+
+```
+
+## Silhouette Plot for HDBSCAN
+
+```{r}
+
+if (exists("sil_hdb")) {
+  
+  sil_df <- as.data.frame(sil_hdb) %>%
+    mutate(obs = row_number()) %>%
+    group_by(cluster) %>%
+    arrange(desc(sil_width), .by_group = TRUE) %>%
+    mutate(order = row_number()) %>%
+    ungroup()
+  
+  sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
+    geom_col() +
+    facet_wrap(~ cluster, scales = "free_x") +
+    labs(
+      title = "Silhouette Plot for HDBSCAN Clusters",
+      x = "Observations",
+      y = "Silhouette Width"
+    )
+  
+  print(sil_plot)
+  
+  ggsave(
+    filename = file.path(output_dir, paste0("hdbscan_silhouette_plot_", hdbscan_label, ".png")),
+    plot = sil_plot,
+    width = 8,
+    height = 5
+  )
+}
+
+```
+
+## Save Standardized Cluster Profiles
+
+```{r}
+cluster_profile_df <- data.frame(
+  Frequency_kHz = centroid_freq / 1000,
+  t(cluster_mean_matrix)
+)
+
+colnames(cluster_profile_df) <- c(
+  "Frequency_kHz",
+  paste0("Cluster_", cluster_ids)
+)
+
+write.csv(
+  cluster_profile_df,
+  file = file.path(output_dir, paste0("hdbscan_scaled_profiles_", hdbscan_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+## Save Summary Table
+
+```{r}
+
+summary_table <- data.frame(
+  Method = "hdbscan",
+  PCA_Used = TRUE,
+  PCA_Variance_Threshold = 0.95,
+  PCsRetained = n_pcs,
+  MinPts = hdbscan_minPts,
+  ClustersFound = n_clusters,
+  NoisePoints = n_noise,
+  NoiseProportion = prop_noise,
+  MaxClicksPerEvent = max_clicks_per_event,
+  EvalSampleSizeUsed = nrow(AllSpec_eval),
+  TotalClicksInFullDataset = nrow(AllSpec_scale)
+)
+
+if (exists("mean_silhouette")) {
+  summary_table$MeanSilhouette_NonNoise <- mean_silhouette
+} else {
+  summary_table$MeanSilhouette_NonNoise <- NA
+}
+
+summary_table
+
+write.csv(
+  summary_table,
+  file = file.path(output_dir, paste0("hdbscan_summary_table_", hdbscan_label, ".csv")),
+  row.names = FALSE
+)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
