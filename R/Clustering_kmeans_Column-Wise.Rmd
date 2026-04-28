@@ -1,8 +1,8 @@
 ---
-title: "Clustering_kmeans_kshape_hdbscan"
+title: "Clustering_kmeans_column-wise"
 author: "Sarah Shiers"
-date: "2026-03-16"
-output: pdf_document
+date: "2026-04-17"
+output: html_document
 ---
 
 ```{r setup, include=FALSE}
@@ -10,18 +10,6 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 
 ```
-
-## Overview
-
-This workflow prepares combined Tukey spectra for clustering by standardizing all events to a shared frequency grid, combining all click spectra into one matrix, and then running one selected clustering method.
-
-Current methods supported by the workflow structure:
-
-- kmeans
-- kshape (placeholder)
-- hdbscan (placeholder)
-
-Current method fully implemented:kmeans
 
 ## Load Required Packages
 
@@ -37,10 +25,12 @@ library(cluster)
 
 ```{r}
 
-cluster_method <- "kmeans"   # options: "kmeans", "kshape", "hdbscan"
+cluster_method <- "kmeans"  
 
-output_dir <- "E:/Analysis/Clustering Output"
+output_dir <- "E:/Analysis/Clustering Output/Column-Wise Scaling"
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+scale_name <- "columnwise"
 
 freq_min <- 19000
 freq_max <- 50000
@@ -49,7 +39,7 @@ freq_max <- 50000
 k_candidates <- 2:15
 
 # Set after reviewing elbow plot
-chosen_k <- 2 # Use "NULL" prior
+chosen_k <- 6 # Use "NULL" prior
 k_label <- paste0("k_", chosen_k)
 
 # Sampling settings
@@ -64,8 +54,7 @@ run_kmeans_on_full_dataset <- TRUE
 
 ```
 
-
-## Load Combined Tukey Spectra
+## Load COmbined Tukey Spectra
 
 ```{r}
 
@@ -76,6 +65,7 @@ class(combined_tukey)
 length(combined_tukey)
 
 ```
+
 
 ## Inspect Frequency Grids
 
@@ -139,7 +129,6 @@ interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
     method = "linear",
     rule = 2
   )$y
-  
 }
 
 interpolated_tukey <- vector("list", length(combined_tukey))
@@ -163,7 +152,6 @@ for (i in seq_along(combined_tukey)) {
   tukey_spectra$freq <- reference_freq
   
   interpolated_tukey[[i]] <- tukey_spectra
-  
 }
 
 ```
@@ -204,7 +192,6 @@ for (i in seq_along(interpolated_tukey)) {
   
   all_click_metadata[[i]] <- click_meta
   all_click_spectra[[i]] <- click_spectra
-  
 }
 
 click_metadata <- do.call(rbind, all_click_metadata)
@@ -229,8 +216,9 @@ centroid_freq <- reference_freq[keepFreq]
 
 ```{r}
 
-# Row-wise scaling: emphasizes spectral shape within each click
-AllSpec_scale <- t(scale(t(AllSpec_Focus)))
+# Column-wise scaling: standardize each frequency bin across all clicks
+# This emphasizes differences relative to the full dataset at each frequency bin
+AllSpec_scale <- scale(AllSpec_Focus)
 AllSpec_scale[is.na(AllSpec_scale)] <- 0
 
 ```
@@ -301,7 +289,7 @@ elbow_plot <- ggplot(elbow_df, aes(x = k, y = WSS)) +
   geom_line() +
   geom_point() +
   labs(
-    title = "Elbow Plot",
+    title = paste("Elbow Plot (", scale_name, " scaling)", sep = ""),
     x = "Number of Clusters",
     y = "Total Within SS"
   )
@@ -309,7 +297,7 @@ elbow_plot <- ggplot(elbow_df, aes(x = k, y = WSS)) +
 print(elbow_plot)
 
 ggsave(
-  filename = file.path(output_dir, "kmeans_elbow_plot.png"),
+  filename = file.path(output_dir, paste0("kmeans_elbow_plot_", scale_name, ".png")),
   plot = elbow_plot,
   width = 7,
   height = 5
@@ -342,7 +330,7 @@ eval_index <- sample_by_event(
   metadata_df = click_metadata,
   max_per_event = max_clicks_per_event,
   seed = 2,
-  max_total = NULL
+  max_total = eval_sample_cap
 )
 
 AllSpec_eval <- AllSpec_scale[eval_index, ]
@@ -370,7 +358,6 @@ sampling_table <- event_total %>%
 sampling_table
 
 ```
-
 
 ## Run Final k-means on Evaluation Sample
 
@@ -440,7 +427,7 @@ silhouette_summary <- rbind(
 )
 
 # Evaluate other k values
-for (k in setdiff(2:6, chosen_k)) {
+for (k in setdiff(2:9, chosen_k)) {
   
   set.seed(3)
   
@@ -488,7 +475,7 @@ sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
   geom_col() +
   facet_wrap(~ cluster, scales = "free_x") +
   labs(
-    title = paste("Silhouette Plot (k =", chosen_k, ")"),
+    title = paste("Silhouette Plot (", scale_name, ", k = ", chosen_k, ")", sep = ""),
     x = "Observations",
     y = "Silhouette Width"
   )
@@ -496,7 +483,7 @@ sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
 print(sil_plot)
 
 ggsave(
-  filename = file.path(output_dir, paste0("kmeans_silhouette_plot_", k_label, ".png")),
+  filename = file.path(output_dir, paste0("kmeans_silhouette_plot_", scale_name, "_", k_label, ".png")),
   plot = sil_plot,
   width = 8,
   height = 5
@@ -504,7 +491,7 @@ ggsave(
 
 cat(
   "Silhouette plot saved to:",
-  file.path(output_dir, paste0("kmeans_silhouette_plot_", k_label, ".png")),
+  file.path(output_dir, paste0("kmeans_silhouette_plot_", scale_name, "_", k_label, ".png")),
   "\n"
 )
 
@@ -537,7 +524,7 @@ scatter_df <- data.frame(
 scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
   geom_point(alpha = 0.7, size = 1.2) +
   labs(
-    title = paste("Clustered Clicks (PCA Projection, k =", chosen_k, ")"),
+    title = paste("Clustered Clicks (PCA Projection, ", scale_name, ", k = ", chosen_k, ")", sep = ""),
     x = "PC1",
     y = "PC2",
     color = "Cluster"
@@ -546,7 +533,7 @@ scatter_plot <- ggplot(scatter_df, aes(x = PC1, y = PC2, color = cluster)) +
 print(scatter_plot)
 
 ggsave(
-  filename = file.path(output_dir, paste0("kmeans_scatterplot_", k_label, ".png")),
+  filename = file.path(output_dir, paste0("kmeans_scatterplot_", scale_name, "_", k_label, ".png")),
   plot = scatter_plot,
   width = 7,
   height = 5
@@ -574,7 +561,7 @@ loadings_plot <- ggplot(loadings_df, aes(x = Frequency_kHz)) +
   geom_line(aes(y = PC1, color = "PC1"), linewidth = 1) +
   geom_line(aes(y = PC2, color = "PC2"), linewidth = 1) +
   labs(
-    title = paste("Full-Dataset PCA Loadings by Frequency (k =", chosen_k, ")"),
+    title = paste("Full-Dataset PCA Loadings by Frequency (", scale_name, ", k = ", chosen_k, ")", sep = ""),
     x = "Frequency (kHz)",
     y = "Loading",
     color = "Component"
@@ -583,7 +570,7 @@ loadings_plot <- ggplot(loadings_df, aes(x = Frequency_kHz)) +
 print(loadings_plot)
 
 ggsave(
-  filename = file.path(output_dir, paste0("kmeans_full_pca_loadings_", k_label, ".png")),
+  filename = file.path(output_dir, paste0("kmeans_full_pca_loadings_", scale_name, "_", k_label, ".png")),
   plot = loadings_plot,
   width = 7,
   height = 5
@@ -591,12 +578,11 @@ ggsave(
 
 write.csv(
   loadings_df,
-  file = file.path(output_dir, paste0("kmeans_full_pca_loadings_", k_label, ".csv")),
+  file = file.path(output_dir, paste0("kmeans_full_pca_loadings_", scale_name, "_", k_label, ".csv")),
   row.names = FALSE
 )
 
 ```
-
 
 ## Save Scatterplot Data
 
@@ -604,7 +590,7 @@ write.csv(
 
 write.csv(
   scatter_df,
-  file = file.path(output_dir, paste0("kmeans_scatterplot_data_", k_label, ".csv")),
+  file = file.path(output_dir, paste0("kmeans_scatterplot_data_", scale_name, "_", k_label, ".csv")),
   row.names = FALSE
 )
 
@@ -614,7 +600,7 @@ write.csv(
 
 ```{r}
 
-centroid_file <- file.path(output_dir, paste0("kmeans_centroid_plot_", k_label, ".png"))
+centroid_file <- file.path(output_dir, paste0("kmeans_centroid_plot_", scale_name, "_", k_label, ".png"))
 
 png(
   filename = centroid_file,
@@ -629,7 +615,7 @@ matplot(
   y = t(km$centers),
   type = "l",
   lty = 1,
-  main = paste("Cluster Centroids (", k_label, ")", sep = ""),
+  main = paste("Cluster Centroids (", scale_name, ", ", k_label, ")", sep = ""),
   xlab = "Frequency (kHz)",
   ylab = "Scaled Intensity"
 )
@@ -654,7 +640,7 @@ colnames(centroid_df) <- c(
 
 write.csv(
   centroid_df,
-  file = file.path(output_dir, paste0("kmeans_centroid_spectra_", k_label, ".csv")),
+  file = file.path(output_dir, paste0("kmeans_centroid_spectra_", scale_name, "_", k_label, ".csv")),
   row.names = FALSE
 )
 
@@ -666,6 +652,7 @@ write.csv(
 
 summary_table <- data.frame(
   Method = cluster_method,
+  Scaling = scale_name,
   KLabel = k_label,
   ChosenK = chosen_k,
   MeanSilhouette = mean_silhouette,
@@ -680,13 +667,14 @@ summary_table
 
 write.csv(
   summary_table,
-  file = file.path(output_dir, paste0("kmeans_summary_table_", k_label, ".csv")),
+  file = file.path(output_dir, paste0("kmeans_summary_table_", scale_name, "_", k_label, ".csv")),
   row.names = FALSE
 )
 
 dist(km$centers)
 
 ```
+
 ## Full Dataset Cluster Variability
 
 ```{r}
@@ -726,13 +714,79 @@ full_cluster_summary
 
 write.csv(
   full_cluster_summary,
-  file = file.path(output_dir, paste0("kmeans_FULL_cluster_variability_", k_label, ".csv")),
+  file = file.path(output_dir, paste0("kmeans_FULL_cluster_variability_", scale_name, "_", k_label, ".csv")),
   row.names = FALSE
 )
 
 dist(km$centers)
 
 ```
+
+## Concatenated Spectrograms by Cluster (evaluation sample, column-wise scaled spectra)
+
+```{r}
+
+cluster_ids <- sort(unique(cluster_labels_eval))
+
+spec_cols <- colorRampPalette(c("white", "#FFD54F", "#FF9800", "#D84315", "#4E0012"))(200)
+
+for (cl in cluster_ids) {
+  
+  cluster_idx <- which(cluster_labels_eval == cl)
+  
+  if (length(cluster_idx) == 0) next
+  
+  cluster_spec <- AllSpec_eval[cluster_idx, , drop = FALSE]
+  
+  out_file <- file.path(
+    output_dir,
+    paste0(
+      "kmeans_concatenated_spectrogram_eval_",
+      scale_name,
+      "_19_50kHz_",
+      k_label,
+      "_cluster_",
+      cl,
+      ".png"
+    )
+  )
+  
+  png(out_file, width = 1800, height = 900)
+  
+  image(
+    x = seq_len(nrow(cluster_spec)),
+    y = centroid_freq / 1000,
+    z = cluster_spec,
+    col = spec_cols,
+    xlab = "Click Number",
+    ylab = "Frequency (kHz)",
+    main = paste("Concatenated Click Spectrogram - k-means Cluster", cl),
+    useRaster = TRUE,
+    axes = FALSE
+  )
+  
+  axis(1)
+  axis(2, at = seq(20, 50, by = 10))
+  box()
+  
+  dev.off()
+  
+  cat("Saved:", out_file, "\n")
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

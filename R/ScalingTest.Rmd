@@ -1,0 +1,417 @@
+---
+title: "ScalingTest"
+author: "Sarah Shiers"
+date: "2026-04-22"
+output: html_document
+---
+
+## Load required package
+
+```{r}
+
+library(ggplot2)
+
+```
+
+## User Settings
+
+```{r}
+
+freq_min <- 19000
+freq_max <- 50000
+n_clicks_to_keep <- 5
+
+```
+
+## Load combined Tukey spectra
+
+```{r}
+
+combined_file <- file.choose()
+combined_tukey <- readRDS(combined_file)
+
+```
+
+## Choose reference frequency grid
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+
+```
+
+## Helper function to interpolate spectra to the shared grid
+
+```{r}
+
+interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
+  approx(
+    x = old_freq,
+    y = old_spec,
+    xout = new_freq,
+    method = "linear",
+    rule = 2
+  )$y
+}
+
+```
+
+## Interpolate all events to the shared frequency grid
+
+```{r}
+
+interpolated_tukey <- vector("list", length(combined_tukey))
+
+for (i in seq_along(combined_tukey)) {
+  
+  tukey_spectra <- combined_tukey[[i]]
+  old_freq <- tukey_spectra$freq
+  old_allSpec <- tukey_spectra$allSpec
+  
+  interpolated_allSpec <- apply(
+    old_allSpec,
+    2,
+    function(spec) interpolate_spectrum(old_freq, spec, reference_freq)
+  )
+  
+  interpolated_allSpec <- as.matrix(interpolated_allSpec)
+  
+  tukey_spectra$allSpec <- interpolated_allSpec
+  tukey_spectra$freq <- reference_freq
+  
+  interpolated_tukey[[i]] <- tukey_spectra
+}
+
+all_match_after_interp <- all(
+  sapply(interpolated_tukey, function(x) identical(x$freq, reference_freq))
+)
+
+all_match_after_interp
+
+```
+
+## Combine all click spectra across events
+
+```{r}
+
+all_click_spectra <- list()
+
+for (i in seq_along(interpolated_tukey)) {
+  all_click_spectra[[i]] <- t(interpolated_tukey[[i]]$allSpec)
+}
+
+all_spec_matrix <- do.call(rbind, all_click_spectra)
+
+```
+
+## Keep only the first 5 clicks
+
+```{r}
+
+first5_matrix <- all_spec_matrix[1:n_clicks_to_keep, , drop = FALSE]
+
+```
+
+## Restrict to 19–50 kHz
+
+```{r}
+
+keepFreq <- which(reference_freq >= freq_min & reference_freq <= freq_max)
+
+first5_focus <- first5_matrix[, keepFreq, drop = FALSE]
+focus_freq <- reference_freq[keepFreq]
+
+```
+
+## Check dimensions
+
+```{r}
+
+dim(first5_focus)
+focus_freq[1]
+focus_freq[length(focus_freq)]
+
+```
+
+## Normalize each click to a zero baseline - Subtract the first retained frequency value from each spectrum
+
+```{r}
+
+first5_norm <- sweep(first5_focus, 1, first5_focus[, 1], FUN = "-")
+
+```
+
+## Whole-spectrum scaling - Scaling within each click / row
+
+```{r}
+
+first5_whole_scaled <- t(scale(t(first5_norm)))
+first5_whole_scaled[is.na(first5_whole_scaled)] <- 0
+
+```
+
+## Frequency-value scaling - Scaling within each frequency bin / column across clicks)
+
+```{r}
+
+first5_freq_scaled <- scale(first5_norm)
+first5_freq_scaled[is.na(first5_freq_scaled)] <- 0
+
+```
+
+## Sanity Checks
+
+```{r}
+
+## Check dimensions
+dim(first5_norm)
+dim(first5_whole_scaled)
+dim(first5_freq_scaled)
+
+## Confirm normalization worked:
+## first value in each click should now be 0
+first5_norm[, 1]
+
+```
+
+## Plot the first 5 clicks for each scaling approach
+
+```{r}
+
+## Save plots
+
+output_dir <- "E:/Analysis/ScalingTest"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+click_colors <- 1:5
+
+## 1. Normalized only
+png(file.path(output_dir, "first5_normalized.png"), width = 1000, height = 700)
+
+matplot(
+  x = focus_freq,
+  y = t(first5_norm),
+  type = "l",
+  lty = 1,
+  lwd = 2,
+  col = click_colors,
+  xlab = "Frequency (Hz)",
+  ylab = "Spectral value",
+  main = "First 5 Clicks - Normalized Only"
+)
+
+legend(
+  "topright",
+  legend = paste0("Click_", 1:5),
+  col = click_colors,
+  lty = 1,
+  lwd = 2
+)
+
+dev.off()
+
+
+## 2. Whole-spectrum scaling
+png(file.path(output_dir, "first5_whole_scaled.png"), width = 1000, height = 700)
+
+matplot(
+  x = focus_freq,
+  y = t(first5_whole_scaled),
+  type = "l",
+  lty = 1,
+  lwd = 2,
+  col = click_colors,
+  xlab = "Frequency (Hz)",
+  ylab = "Scaled spectral value",
+  main = "First 5 Clicks - Whole Spectrum Scaling"
+)
+
+legend(
+  "topright",
+  legend = paste0("Click_", 1:5),
+  col = click_colors,
+  lty = 1,
+  lwd = 2
+)
+
+dev.off()
+
+
+## 3. Frequency-value scaling
+png(file.path(output_dir, "first5_freq_scaled.png"), width = 1000, height = 700)
+
+matplot(
+  x = focus_freq,
+  y = t(first5_freq_scaled),
+  type = "l",
+  lty = 1,
+  lwd = 2,
+  col = click_colors,
+  xlab = "Frequency (Hz)",
+  ylab = "Scaled spectral value",
+  main = "First 5 Clicks - Frequency Value Scaling"
+)
+
+legend(
+  "topright",
+  legend = paste0("Click_", 1:5),
+  col = click_colors,
+  lty = 1,
+  lwd = 2
+)
+
+dev.off()
+
+```
+
+## Save each click as its own comparison plot
+
+```{r}
+
+comparison_colors <- c("black", "red", "blue")
+
+for (i in 1:n_clicks_to_keep) {
+  
+  png(
+    file.path(output_dir, paste0("click_", i, "_comparison.png")),
+    width = 1000,
+    height = 700
+  )
+  
+  y_min <- min(
+    first5_norm[i, ],
+    first5_whole_scaled[i, ],
+    first5_freq_scaled[i, ]
+  )
+  
+  y_max <- max(
+    first5_norm[i, ],
+    first5_whole_scaled[i, ],
+    first5_freq_scaled[i, ]
+  )
+  
+  plot(
+    focus_freq,
+    first5_norm[i, ],
+    type = "l",
+    lwd = 2,
+    col = comparison_colors[1],
+    xlab = "Frequency (Hz)",
+    ylab = "Spectral value",
+    main = paste("Click", i, "- Scaling Comparison"),
+    ylim = c(y_min, y_max)
+  )
+  
+  lines(
+    focus_freq,
+    first5_whole_scaled[i, ],
+    lwd = 2,
+    col = comparison_colors[2]
+  )
+  
+  lines(
+    focus_freq,
+    first5_freq_scaled[i, ],
+    lwd = 2,
+    col = comparison_colors[3]
+  )
+  
+  legend(
+    "topright",
+    legend = c("Normalized only", "Whole spectrum", "Frequency value"),
+    col = comparison_colors,
+    lty = 1,
+    lwd = 2
+  )
+  
+  dev.off()
+}
+
+```
+
+## Two-panel Comparison Plots
+
+```{r}
+
+scaled_colors <- c("red", "blue")
+
+for (i in 1:n_clicks_to_keep) {
+  
+  png(
+    file.path(output_dir, paste0("click_", i, "_two_panel_comparison.png")),
+    width = 1400,
+    height = 700
+  )
+  
+  par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+  
+  ## Left panel: normalized only
+  plot(
+    focus_freq,
+    first5_norm[i, ],
+    type = "l",
+    lwd = 2,
+    col = "black",
+    xlab = "Frequency (Hz)",
+    ylab = "Spectral value",
+    main = paste("Click", i, "- Normalized Only")
+  )
+  
+  ## Right panel: scaled versions only
+  y_min_scaled <- min(first5_whole_scaled[i, ], first5_freq_scaled[i, ])
+  y_max_scaled <- max(first5_whole_scaled[i, ], first5_freq_scaled[i, ])
+  
+  plot(
+    focus_freq,
+    first5_whole_scaled[i, ],
+    type = "l",
+    lwd = 2,
+    col = scaled_colors[1],
+    xlab = "Frequency (Hz)",
+    ylab = "Scaled spectral value",
+    main = paste("Click", i, "- Scaled Comparison"),
+    ylim = c(y_min_scaled, y_max_scaled)
+  )
+  
+  lines(
+    focus_freq,
+    first5_freq_scaled[i, ],
+    lwd = 2,
+    col = scaled_colors[2]
+  )
+  
+  legend(
+    "topright",
+    legend = c("Whole spectrum", "Frequency value"),
+    col = scaled_colors,
+    lty = 1,
+    lwd = 2
+  )
+  
+  dev.off()
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -60,7 +60,7 @@ freq_max <- 50000
 k_candidates <- 2:6
 
 # Set after reviewing summary metrics
-chosen_k <- 3
+chosen_k <- 2
 k_label <- paste0("k_", chosen_k)
 
 # Sampling settings
@@ -74,7 +74,7 @@ kshape_nrep_final <- 1L
 # Batch size for assigning full dataset to learned centroids
 assignment_batch_size <- 5000
 
-k_candidates <- c(3)
+k_candidates <- c(2)
 
 ```
 
@@ -599,6 +599,120 @@ click_metadata_eval$cluster <- cluster_labels_eval
 
 ```
 
+## Concatenated Spectrograms by Cluster (evaluation sample, scaled spectra)
+
+```{r}
+
+# Output one concatenated spectrogram per cluster using the scaled evaluation sample
+# This uses the already-restricted 19–50 kHz spectra in AllSpec_eval
+
+cluster_ids <- sort(unique(cluster_labels_eval))
+
+spec_cols <- colorRampPalette(c("white", "#FFD54F", "#FF9800", "#D84315", "#4E0012"))(200)
+
+for (cl in cluster_ids) {
+  
+  cluster_idx <- which(cluster_labels_eval == cl)
+  
+  if (length(cluster_idx) == 0) next
+  
+  cluster_spec <- AllSpec_eval[cluster_idx, , drop = FALSE]
+  
+  out_file <- paste0(
+    "E:/Analysis/Clustering Output/",
+    "kshape_concatenated_spectrogram_eval_scaled_19_50kHz_",
+    k_label,
+    "_cluster_",
+    cl,
+    ".png"
+  )
+  
+  png(out_file, width = 1800, height = 900)
+  
+  image(
+    x = seq_len(nrow(cluster_spec)),
+    y = centroid_freq / 1000,
+    z = cluster_spec,
+    col = spec_cols,
+    xlab = "Click Number",
+    ylab = "Frequency (kHz)",
+    main = paste("Concatenated Click Spectrogram - Cluster", cl),
+    useRaster = TRUE,
+    axes = FALSE
+  )
+  
+  axis(1)
+  axis(2, at = seq(20, 50, by = 10))
+  box()
+  
+  dev.off()
+  
+  cat("Saved:", out_file, "\n")
+}
+
+```
+
+## Mean Spectrum with 95% CI by Cluster (evaluation sample, scaled spectra)
+
+```{r}
+
+cluster_ids <- sort(unique(cluster_labels_eval))
+
+for (cl in cluster_ids) {
+  
+  cluster_idx <- which(cluster_labels_eval == cl)
+  
+  if (length(cluster_idx) < 2) next
+  
+  cluster_spec <- AllSpec_eval[cluster_idx, , drop = FALSE]
+  
+  freq_khz <- centroid_freq / 1000
+  
+  # Mean at each frequency bin
+  mean_spec <- colMeans(cluster_spec)
+  
+  # 95% central interval at each frequency bin
+  lower <- apply(cluster_spec, 2, quantile, probs = 0.025, na.rm = TRUE)
+  upper <- apply(cluster_spec, 2, quantile, probs = 0.975, na.rm = TRUE)
+  
+  out_file <- paste0(
+    "E:/Analysis/Clustering Output/",
+    "kshape_mean_spectrum_quantile_band_eval_scaled_19_50kHz_",
+    k_label,
+    "_cluster_",
+    cl,
+    ".png"
+  )
+  
+  y_lim <- range(c(lower, upper), na.rm = TRUE)
+  
+  png(out_file, width = 1200, height = 700)
+  
+  plot(
+    freq_khz, mean_spec,
+    type = "n",
+    xlab = "Frequency (kHz)",
+    ylab = "Scaled Intensity",
+    main = paste("Mean Spectrum with 95% Quantile Band - Cluster", cl),
+    ylim = y_lim
+  )
+  
+  polygon(
+    c(freq_khz, rev(freq_khz)),
+    c(upper, rev(lower)),
+    col = rgb(1, 0.5, 0, 0.3),
+    border = NA
+  )
+  
+  lines(freq_khz, mean_spec, lwd = 2)
+  
+  dev.off()
+  
+  cat("Saved:", out_file, "\n")
+}  
+
+```
+
 ## Final Mean Silhouette for Chosen k
 
 ```{r}
@@ -962,5 +1076,56 @@ silhouette_summary
 
 ```
 
+## Full Dataset Cluster Variability
 
+```{r}
+
+cat("Computing full dataset cluster variability for k-shape...\n")
+
+# Distance of every click to its assigned k-shape centroid using SBD
+full_dist_to_centroid <- numeric(nrow(AllSpec_scale))
+
+for (i in seq_len(nrow(AllSpec_scale))) {
+  
+  this_cluster <- cluster_labels_full[i]
+  this_centroid <- centroid_matrix[this_cluster, ]
+  
+  full_dist_to_centroid[i] <- as.numeric(proxy::dist(
+    x = matrix(AllSpec_scale[i, ], nrow = 1),
+    y = matrix(this_centroid, nrow = 1),
+    method = "SBD"
+  ))
+}
+
+# Add to full metadata
+click_metadata_full$dist_to_centroid <- full_dist_to_centroid
+
+# Summary statistics: within-cluster variability
+full_cluster_summary <- click_metadata_full %>%
+  group_by(cluster) %>%
+  summarise(
+    n_clicks = n(),
+    mean_dist = mean(dist_to_centroid),
+    sd_dist = sd(dist_to_centroid),
+    median_dist = median(dist_to_centroid),
+    .groups = "drop"
+  )
+
+full_cluster_summary
+
+write.csv(
+  full_cluster_summary,
+  file = file.path(output_dir, paste0("kshape_FULL_cluster_variability_", k_label, ".csv")),
+  row.names = FALSE
+)
+
+# Between-cluster variability: pairwise distances among centroids
+centroid_distances <- as.matrix(proxy::dist(
+  x = centroid_matrix,
+  method = "SBD"
+))
+
+centroid_distances
+
+```
 

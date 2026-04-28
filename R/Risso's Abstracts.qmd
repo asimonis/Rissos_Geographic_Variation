@@ -1,0 +1,21 @@
+---
+title: "Risso's Abstracts"
+format: docx
+editor: visual
+---
+
+## **Authors**
+
+Sarah M.S. Moseley, Anne Simonis, Ellen Hines, Marie A. Roch, Shannon Rankin
+
+# Abstract(s)
+
+## The following is the abstract used for submission to the ASA conference:
+
+Risso’s dolphins (*Grampus griseus*) produce broadband echolocation clicks that vary across regions, offering insight into population structure and habitat use. Two stocks are recognized in U.S. Pacific waters: the California–Oregon–Washington stock and the Hawaiian stock, but these designations may overlook finer-scale structure within the California Current Ecosystem (CCE). Building on evidence of geographic variation in Risso’s dolphin echolocation click types across the U.S. East Coast, Gulf of Mexico, Southern California Bight, and Hawaiian Islands, spectral peak and notch frequencies were measured from Risso’s dolphin echolocation clicks during three NOAA surveys between 2016 and 2023. Acoustic recordings were collected with drifting buoys, allowing broad coverage of the entire CCE region along the U.S. West Coast. Clustering of spectral features highlighted several different click types. We compared spatio-temporal variation in Risso’s click types across Oregon, Northern California, and Central California, including seasonal and diel variation. These results provide the first comprehensive assessment of Risso’s dolphin click characteristics across the CCE and enable comparison with other U.S. regions where click-type divergence has been observed. Fine-scale spatial, seasonal, and diel acoustic patterns can inform population assessment, ecological understanding, and ecosystem-based management.
+
+## The following is the abstract used for submission to the SMM conference:
+
+**Use of passive acoustic monitoring to assess population structure in Risso’s dolphins (*Grampus griseus*) across the California Current Ecosystem**
+
+Risso’s dolphins (*Grampus griseus*) are a widely distributed, primarily offshore species whose population structure within the California Current Ecosystem (CCE) remains relatively unstudied. In U.S. Pacific waters, two stocks are currently recognized — the California–Oregon–Washington stock and the Hawaiian stock — though these designations may overlook finer-scale spatial and temporal structure that is difficult to resolve using current stock assessment approaches alone. Passive acoustic monitoring (PAM) provides an alternative means of examining population-level structure by characterizing spatial and temporal variation in acoustic behavior across broad offshore regions. We used PAM data collected during three NOAA surveys between 2016 and 2023 to investigate spatial, seasonal, and diel variation in Risso’s dolphin acoustic signals across the CCE. Recordings from drifting acoustic recorders provided coverage spanning Oregon, Northern California, and Central California. Distinct acoustic signal types were identified, and their relative occurrence was examined across regions and time periods. Spatial and temporal differences in signal-type distributions were observed, indicating structured variation within the CCE. Building upon prior work demonstrating acoustic differentiation of Risso’s dolphins within other regions, these results further resolve how signal-type composition varies across regions and seasons. By revealing fine-scale spatial and temporal structure, PAM offers a valuable tool for informing population assessment, improving ecological understanding, and supporting ecosystem-based management of offshore cetaceans.

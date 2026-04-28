@@ -1,0 +1,920 @@
+---
+title: "Clustering_kmeans_Normalized"
+author: "Sarah Moseley"
+date: "2026-04-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Setup and User Settings
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(cluster)
+
+# -----------------------------
+# Base Output Directory
+# -----------------------------
+base_output_dir <- "E:/Analysis/Clustering Output/Normalized"
+dir.create(base_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# -----------------------------
+# Analysis Variants
+# -----------------------------
+analysis_types <- list(
+  "Raw Normalized" = list(type = "raw_norm"),
+  "Normalized Whole Spectrum Scaling" = list(type = "row_scale"),
+  "Normalized Frequency Scaling" = list(type = "col_scale")
+)
+
+# -----------------------------
+# Clustering Settings
+# -----------------------------
+cluster_method <- "kmeans"
+
+freq_min <- 19000
+freq_max <- 50000
+
+k_candidates <- 2:15
+chosen_k <- 2
+k_label <- paste0("k_", chosen_k)
+
+max_clicks_per_event <- 200
+elbow_sample_cap <- 20000
+eval_sample_cap <- NULL
+
+run_kmeans_on_full_dataset <- TRUE
+
+# -----------------------------
+# Helper: Create Structured Output Folders
+# -----------------------------
+create_output_structure <- function(base_dir, analysis_name, method, k_label) {
+  
+  analysis_dir <- file.path(base_dir, analysis_name)
+  method_dir <- file.path(analysis_dir, paste(method, k_label))
+  
+  dirs <- list(
+    root = method_dir,
+    plots = file.path(method_dir, "plots"),
+    data = file.path(method_dir, "data"),
+    diagnostics = file.path(method_dir, "diagnostics"),
+    spectrograms = file.path(method_dir, "concatenated_spectrograms")
+  )
+  
+  lapply(dirs, function(d) {
+    dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  })
+  
+  return(dirs)
+}
+
+```
+
+## Load Combined Tukey Spectra
+
+```{r}
+
+combined_file <- file.choose()
+combined_tukey <- readRDS(combined_file)
+
+class(combined_tukey)
+length(combined_tukey)
+
+```
+
+## Inspect Frequency Grid
+
+```{r}
+
+reference_freq <- combined_tukey[[1]]$freq
+
+freq_check <- data.frame(
+  EventID = character(),
+  SameAsReference = logical(),
+  LengthFreq = integer(),
+  FreqStep = numeric(),
+  MaxFreq = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(combined_tukey)) {
+  
+  current_freq <- combined_tukey[[i]]$freq
+  
+  freq_check <- rbind(
+    freq_check,
+    data.frame(
+      EventID = combined_tukey[[i]]$EventID,
+      SameAsReference = identical(current_freq, reference_freq),
+      LengthFreq = length(current_freq),
+      FreqStep = current_freq[2] - current_freq[1],
+      MaxFreq = max(current_freq),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+freq_check
+
+```
+
+## Interpolate Spectra to Shared Grid
+
+```{r}
+
+interpolate_spectrum <- function(old_freq, old_spec, new_freq) {
+  approx(
+    x = old_freq,
+    y = old_spec,
+    xout = new_freq,
+    method = "linear",
+    rule = 2
+  )$y
+}
+
+interpolated_tukey <- vector("list", length(combined_tukey))
+
+for (i in seq_along(combined_tukey)) {
+  
+  tukey_spectra <- combined_tukey[[i]]
+  
+  old_freq <- tukey_spectra$freq
+  old_allSpec <- tukey_spectra$allSpec
+  
+  interpolated_allSpec <- apply(
+    old_allSpec,
+    2,
+    function(spec) interpolate_spectrum(old_freq, spec, reference_freq)
+  )
+  
+  tukey_spectra$allSpec <- as.matrix(interpolated_allSpec)
+  tukey_spectra$freq <- reference_freq
+  
+  interpolated_tukey[[i]] <- tukey_spectra
+}
+
+all_match_after_interp <- all(
+  sapply(interpolated_tukey, function(x) identical(x$freq, reference_freq))
+)
+
+all_match_after_interp
+
+```
+
+## Combine Spectra Across All EVents
+
+```{r}
+
+all_click_metadata <- list()
+all_click_spectra <- list()
+
+for (i in seq_along(interpolated_tukey)) {
+  
+  tukey_spectra <- interpolated_tukey[[i]]
+  
+  event_id <- tukey_spectra$EventID
+  uid <- tukey_spectra$UID
+  
+  click_spectra <- t(tukey_spectra$allSpec)
+  
+  click_meta <- data.frame(
+    EventID = event_id,
+    UID = uid,
+    stringsAsFactors = FALSE
+  )
+  
+  all_click_metadata[[i]] <- click_meta
+  all_click_spectra[[i]] <- click_spectra
+}
+
+click_metadata <- do.call(rbind, all_click_metadata)
+all_spec_matrix <- do.call(rbind, all_click_spectra)
+
+dim(all_spec_matrix)
+
+```
+
+## Restrict Spectra to 19–50 kHz
+
+```{r}
+
+keepFreq <- which(reference_freq >= freq_min & reference_freq <= freq_max)
+
+AllSpec_Focus <- all_spec_matrix[, keepFreq]
+centroid_freq <- reference_freq[keepFreq]
+
+dim(AllSpec_Focus)
+range(centroid_freq)
+
+```
+
+## Build Normalized / Scaled Analysis Matrices
+
+```{r}
+
+normalize_to_zero_baseline <- function(spec_matrix) {
+  
+  first_freq_value <- spec_matrix[, 1]
+  normalized_matrix <- sweep(spec_matrix, 1, first_freq_value, FUN = "-")
+  
+  return(normalized_matrix)
+}
+
+prepare_analysis_matrix <- function(spec_matrix, analysis_type) {
+  
+  # Step 1: always normalize first
+  normalized_matrix <- normalize_to_zero_baseline(spec_matrix)
+  
+  # Step 2: optionally scale after normalization
+  if (analysis_type == "raw_norm") {
+    
+    output_matrix <- normalized_matrix
+    
+  } else if (analysis_type == "row_scale") {
+    
+    output_matrix <- t(scale(t(normalized_matrix)))
+    output_matrix[is.na(output_matrix)] <- 0
+    
+  } else if (analysis_type == "col_scale") {
+    
+    output_matrix <- scale(normalized_matrix)
+    output_matrix[is.na(output_matrix)] <- 0
+    
+  } else {
+    
+    stop("Unknown analysis_type: ", analysis_type)
+  }
+  
+  return(as.matrix(output_matrix))
+}
+
+analysis_matrices <- list()
+
+for (analysis_name in names(analysis_types)) {
+  
+  analysis_type <- analysis_types[[analysis_name]]$type
+  
+  analysis_matrices[[analysis_name]] <- prepare_analysis_matrix(
+    spec_matrix = AllSpec_Focus,
+    analysis_type = analysis_type
+  )
+  
+  cat(
+    analysis_name,
+    "matrix dimensions:",
+    dim(analysis_matrices[[analysis_name]])[1],
+    "clicks x",
+    dim(analysis_matrices[[analysis_name]])[2],
+    "frequency bins\n"
+  )
+}
+
+```
+
+## Helper: Sample Up to N Clicks Per Event
+
+```{r}
+
+sample_by_event <- function(metadata_df, max_per_event, seed = NULL, max_total = NULL) {
+  
+  if (!is.null(seed)) set.seed(seed)
+  
+  split_indices <- split(seq_len(nrow(metadata_df)), metadata_df$EventID)
+  
+  sampled_indices <- unlist(
+    lapply(split_indices, function(idx) {
+      sample(idx, size = min(length(idx), max_per_event))
+    }),
+    use.names = FALSE
+  )
+  
+  if (!is.null(max_total) && length(sampled_indices) > max_total) {
+    sampled_indices <- sample(sampled_indices, size = max_total)
+  }
+  
+  return(sampled_indices)
+}
+
+```
+
+## Run Analysis for Each Normalization Type
+
+```{r}
+
+results_list <- list()
+
+for (analysis_name in names(analysis_matrices)) {
+  
+  cat("\n============================\n")
+  cat("Running:", analysis_name, "\n")
+  cat("============================\n")
+  
+  AllSpec_current <- analysis_matrices[[analysis_name]]
+  
+  # -----------------------------
+  # Create Output Structure
+  # -----------------------------
+  dirs <- create_output_structure(
+    base_dir = base_output_dir,
+    analysis_name = analysis_name,
+    method = cluster_method,
+    k_label = k_label
+  )
+  
+  # -----------------------------
+  # Elbow Sampling
+  # -----------------------------
+  elbow_index <- sample_by_event(
+    metadata_df = click_metadata,
+    max_per_event = max_clicks_per_event,
+    seed = 1,
+    max_total = elbow_sample_cap
+  )
+  
+  AllSpec_elbow <- AllSpec_current[elbow_index, ]
+  
+  wss <- numeric(length(k_candidates))
+  
+  for (i in seq_along(k_candidates)) {
+    
+    k <- k_candidates[i]
+    
+    km_tmp <- kmeans(
+      AllSpec_elbow,
+      centers = k,
+      nstart = 20,
+      algorithm = "Lloyd"
+    )
+    
+    wss[i] <- km_tmp$tot.withinss
+  }
+  
+  elbow_df <- data.frame(k = k_candidates, WSS = wss)
+  
+  elbow_plot <- ggplot(elbow_df, aes(x = k, y = WSS)) +
+    geom_line() +
+    geom_point() +
+    labs(title = paste("Elbow Plot -", analysis_name))
+  
+  ggsave(
+    file.path(dirs$plots, paste0("elbow_", analysis_name, ".png")),
+    elbow_plot,
+    width = 7,
+    height = 5
+  )
+  
+  # -----------------------------
+  # Evaluation Sample
+  # -----------------------------
+  eval_index <- sample_by_event(
+    metadata_df = click_metadata,
+    max_per_event = max_clicks_per_event,
+    seed = 2
+  )
+  
+  AllSpec_eval <- AllSpec_current[eval_index, ]
+  click_metadata_eval <- click_metadata[eval_index, ]
+  
+  cat("Eval sample size:", nrow(AllSpec_eval), "\n")
+  
+  # -----------------------------
+  # KMEANS
+  # -----------------------------
+  set.seed(3)
+  
+  if (run_kmeans_on_full_dataset) {
+    
+    km <- kmeans(
+      AllSpec_current,
+      centers = chosen_k,
+      nstart = 50,
+      algorithm = "Lloyd"
+    )
+    
+    cluster_labels_full <- km$cluster
+    cluster_labels_eval <- cluster_labels_full[eval_index]
+    
+  } else {
+    
+    km <- kmeans(
+      AllSpec_eval,
+      centers = chosen_k,
+      nstart = 50
+    )
+    
+    cluster_labels_eval <- km$cluster
+  }
+  
+  # -----------------------------
+  # Silhouette
+  # -----------------------------
+  dist_eval <- dist(AllSpec_eval)
+  
+  sil <- silhouette(cluster_labels_eval, dist_eval)
+  mean_sil <- mean(sil[, "sil_width"])
+  
+  cat("Mean silhouette:", mean_sil, "\n")
+  
+  # Save silhouette summary
+  write.csv(
+    data.frame(
+      Analysis = analysis_name,
+      K = chosen_k,
+      MeanSilhouette = mean_sil
+    ),
+    file = file.path(dirs$data, "silhouette_summary.csv"),
+    row.names = FALSE
+  )
+  
+  # Silhouette plot
+  sil_df <- as.data.frame(sil) %>%
+    mutate(obs = row_number()) %>%
+    group_by(cluster) %>%
+    arrange(desc(sil_width), .by_group = TRUE) %>%
+    mutate(order = row_number()) %>%
+    ungroup()
+  
+  sil_plot <- ggplot(sil_df, aes(x = order, y = sil_width)) +
+    geom_col() +
+    facet_wrap(~ cluster, scales = "free_x") +
+    labs(title = paste("Silhouette -", analysis_name))
+  
+  ggsave(
+    file.path(dirs$plots, "silhouette_plot.png"),
+    sil_plot,
+    width = 8,
+    height = 5
+  )
+  
+  # Store for later chunks (PCA, centroids, etc.)
+  results_list[[analysis_name]] <- list(
+    dirs = dirs,
+    km = km,
+    eval_index = eval_index,
+    cluster_labels_eval = cluster_labels_eval,
+    AllSpec_eval = AllSpec_eval,
+    AllSpec_current = AllSpec_current
+  )
+}
+
+```
+
+## PCA Diagnostics and Plots for Each Analysis Type
+
+```{r}
+
+calculate_pca_variance <- function(pca_object, n_components = 2) {
+  
+  eigenvalues <- pca_object$sdev^2
+  
+  data.frame(
+    RetainedComponents = n_components,
+    RetainedEigenvalueSum = sum(eigenvalues[1:n_components]),
+    TotalEigenvalueSum = sum(eigenvalues),
+    PercentVarianceExplained = 100 * sum(eigenvalues[1:n_components]) / sum(eigenvalues)
+  )
+}
+
+get_nonzero_variance_columns <- function(mat) {
+  col_sd <- apply(mat, 2, sd, na.rm = TRUE)
+  is.finite(col_sd) & col_sd > 0
+}
+
+for (analysis_name in names(results_list)) {
+  
+  cat("\nRunning PCA diagnostics for:", analysis_name, "\n")
+  
+  result <- results_list[[analysis_name]]
+  
+  dirs <- result$dirs
+  AllSpec_eval <- result$AllSpec_eval
+  AllSpec_current <- result$AllSpec_current
+  eval_index <- result$eval_index
+  cluster_labels_eval <- result$cluster_labels_eval
+  
+  click_metadata_eval <- click_metadata[eval_index, ]
+  
+  # --------------------------------------------------
+  # Remove zero-variance columns before PCA
+  # --------------------------------------------------
+  
+  pca_keep_cols <- get_nonzero_variance_columns(AllSpec_eval)
+  
+  AllSpec_eval_pca <- AllSpec_eval[, pca_keep_cols, drop = FALSE]
+  AllSpec_current_pca <- AllSpec_current[, pca_keep_cols, drop = FALSE]
+  centroid_freq_pca <- centroid_freq[pca_keep_cols]
+  
+  removed_cols <- sum(!pca_keep_cols)
+  
+  cat(
+    "PCA removed",
+    removed_cols,
+    "zero-variance frequency columns for",
+    analysis_name,
+    "\n"
+  )
+  
+  # --------------------------------------------------
+  # Covariance-style PCA
+  # --------------------------------------------------
+  
+  pca_cov_eval <- prcomp(
+    AllSpec_eval_pca,
+    center = FALSE,
+    scale. = FALSE
+  )
+  
+  pca_cov_full <- prcomp(
+    AllSpec_current_pca,
+    center = FALSE,
+    scale. = FALSE
+  )
+  
+  cov_variance_df <- calculate_pca_variance(pca_cov_eval, n_components = 2)
+  cov_variance_df$Analysis <- analysis_name
+  cov_variance_df$PCA_Type <- "Covariance-style PCA"
+  cov_variance_df$ZeroVarianceColumnsRemoved <- removed_cols
+  
+  # --------------------------------------------------
+  # Correlation PCA
+  # --------------------------------------------------
+  
+  pca_cor_eval <- prcomp(
+    AllSpec_eval_pca,
+    center = TRUE,
+    scale. = TRUE
+  )
+  
+  pca_cor_full <- prcomp(
+    AllSpec_current_pca,
+    center = TRUE,
+    scale. = TRUE
+  )
+  
+  cor_variance_df <- calculate_pca_variance(pca_cor_eval, n_components = 2)
+  cor_variance_df$Analysis <- analysis_name
+  cor_variance_df$PCA_Type <- "Correlation PCA"
+  cor_variance_df$ZeroVarianceColumnsRemoved <- removed_cols
+  
+  # --------------------------------------------------
+  # Save PCA variance summary
+  # --------------------------------------------------
+  
+  pca_variance_summary <- rbind(cov_variance_df, cor_variance_df)
+  
+  write.csv(
+    pca_variance_summary,
+    file = file.path(dirs$diagnostics, "pca_variance_explained_summary.csv"),
+    row.names = FALSE
+  )
+  
+  print(pca_variance_summary)
+  
+  # --------------------------------------------------
+  # Covariance PCA Scatterplot
+  # --------------------------------------------------
+  
+  scatter_cov_df <- data.frame(
+    PC1 = pca_cov_eval$x[, 1],
+    PC2 = pca_cov_eval$x[, 2],
+    EventID = click_metadata_eval$EventID,
+    UID = click_metadata_eval$UID,
+    cluster = as.factor(cluster_labels_eval)
+  )
+  
+  scatter_cov_plot <- ggplot(scatter_cov_df, aes(x = PC1, y = PC2, color = cluster)) +
+    geom_point(alpha = 0.7, size = 1.2) +
+    labs(
+      title = paste("Covariance PCA Projection -", analysis_name),
+      subtitle = paste0(
+        "PC1 + PC2 variance explained: ",
+        round(cov_variance_df$PercentVarianceExplained, 2),
+        "%"
+      ),
+      x = "PC1",
+      y = "PC2",
+      color = "Cluster"
+    )
+  
+  print(scatter_cov_plot)
+  
+  ggsave(
+    file.path(dirs$plots, "pca_scatter_covariance.png"),
+    scatter_cov_plot,
+    width = 7,
+    height = 5
+  )
+  
+  write.csv(
+    scatter_cov_df,
+    file = file.path(dirs$data, "pca_scatter_covariance_data.csv"),
+    row.names = FALSE
+  )
+  
+  # --------------------------------------------------
+  # Correlation PCA Scatterplot
+  # --------------------------------------------------
+  
+  scatter_cor_df <- data.frame(
+    PC1 = pca_cor_eval$x[, 1],
+    PC2 = pca_cor_eval$x[, 2],
+    EventID = click_metadata_eval$EventID,
+    UID = click_metadata_eval$UID,
+    cluster = as.factor(cluster_labels_eval)
+  )
+  
+  scatter_cor_plot <- ggplot(scatter_cor_df, aes(x = PC1, y = PC2, color = cluster)) +
+    geom_point(alpha = 0.7, size = 1.2) +
+    labs(
+      title = paste("Correlation PCA Projection -", analysis_name),
+      subtitle = paste0(
+        "PC1 + PC2 variance explained: ",
+        round(cor_variance_df$PercentVarianceExplained, 2),
+        "%"
+      ),
+      x = "PC1",
+      y = "PC2",
+      color = "Cluster"
+    )
+  
+  print(scatter_cor_plot)
+  
+  ggsave(
+    file.path(dirs$plots, "pca_scatter_correlation.png"),
+    scatter_cor_plot,
+    width = 7,
+    height = 5
+  )
+  
+  write.csv(
+    scatter_cor_df,
+    file = file.path(dirs$data, "pca_scatter_correlation_data.csv"),
+    row.names = FALSE
+  )
+  
+  # --------------------------------------------------
+  # Full Dataset PCA Loadings
+  # --------------------------------------------------
+  
+  cov_loadings_df <- data.frame(
+    Frequency_kHz = centroid_freq_pca / 1000,
+    PC1 = pca_cov_full$rotation[, 1],
+    PC2 = pca_cov_full$rotation[, 2],
+    PCA_Type = "Covariance-style PCA"
+  )
+  
+  cor_loadings_df <- data.frame(
+    Frequency_kHz = centroid_freq_pca / 1000,
+    PC1 = pca_cor_full$rotation[, 1],
+    PC2 = pca_cor_full$rotation[, 2],
+    PCA_Type = "Correlation PCA"
+  )
+  
+  loadings_df <- rbind(cov_loadings_df, cor_loadings_df)
+  
+  write.csv(
+    loadings_df,
+    file = file.path(dirs$data, "full_dataset_pca_loadings.csv"),
+    row.names = FALSE
+  )
+  
+  cov_loadings_plot <- ggplot(cov_loadings_df, aes(x = Frequency_kHz)) +
+    geom_line(aes(y = PC1, color = "PC1"), linewidth = 1) +
+    geom_line(aes(y = PC2, color = "PC2"), linewidth = 1) +
+    labs(
+      title = paste("Full-Dataset Covariance PCA Loadings -", analysis_name),
+      x = "Frequency (kHz)",
+      y = "Loading",
+      color = "Component"
+    )
+  
+  print(cov_loadings_plot)
+  
+  ggsave(
+    file.path(dirs$plots, "full_dataset_pca_loadings_covariance.png"),
+    cov_loadings_plot,
+    width = 7,
+    height = 5
+  )
+  
+  cor_loadings_plot <- ggplot(cor_loadings_df, aes(x = Frequency_kHz)) +
+    geom_line(aes(y = PC1, color = "PC1"), linewidth = 1) +
+    geom_line(aes(y = PC2, color = "PC2"), linewidth = 1) +
+    labs(
+      title = paste("Full-Dataset Correlation PCA Loadings -", analysis_name),
+      x = "Frequency (kHz)",
+      y = "Loading",
+      color = "Component"
+    )
+  
+  print(cor_loadings_plot)
+  
+  ggsave(
+    file.path(dirs$plots, "full_dataset_pca_loadings_correlation.png"),
+    cor_loadings_plot,
+    width = 7,
+    height = 5
+  )
+  
+  cat("Saved PCA outputs for:", analysis_name, "\n")
+}
+
+```
+
+## Centroids, Variability, and Concatenated Spectrograms
+
+```{r}
+
+for (analysis_name in names(results_list)) {
+  
+  cat("\nRunning centroid + spectrogram outputs for:", analysis_name, "\n")
+  
+  result <- results_list[[analysis_name]]
+  
+  dirs <- result$dirs
+  km <- result$km
+  eval_index <- result$eval_index
+  cluster_labels_eval <- result$cluster_labels_eval
+  AllSpec_eval <- result$AllSpec_eval
+  AllSpec_current <- result$AllSpec_current
+  
+  # --------------------------------------------------
+  # Centroid Spectra
+  # --------------------------------------------------
+  
+  centroid_df <- data.frame(
+    Frequency_kHz = centroid_freq / 1000,
+    t(km$centers)
+  )
+  
+  colnames(centroid_df) <- c(
+    "Frequency_kHz",
+    paste0("Cluster_", 1:nrow(km$centers))
+  )
+  
+  write.csv(
+    centroid_df,
+    file = file.path(dirs$data, "centroid_spectra.csv"),
+    row.names = FALSE
+  )
+  
+  centroid_plot_file <- file.path(dirs$plots, "centroid_plot.png")
+  
+  png(
+    filename = centroid_plot_file,
+    width = 7,
+    height = 5,
+    units = "in",
+    res = 300
+  )
+  
+  matplot(
+    x = centroid_freq / 1000,
+    y = t(km$centers),
+    type = "l",
+    lty = 1,
+    main = paste("Cluster Centroids -", analysis_name),
+    xlab = "Frequency (kHz)",
+    ylab = "Intensity"
+  )
+  
+  dev.off()
+  
+  # --------------------------------------------------
+  # Cluster Variability
+  # --------------------------------------------------
+  
+  if (run_kmeans_on_full_dataset) {
+    
+    cluster_labels_full <- km$cluster
+    
+    dist_to_centroid <- numeric(nrow(AllSpec_current))
+    
+    for (i in seq_len(nrow(AllSpec_current))) {
+      
+      this_cluster <- cluster_labels_full[i]
+      this_centroid <- km$centers[this_cluster, ]
+      
+      dist_to_centroid[i] <- sqrt(
+        sum((AllSpec_current[i, ] - this_centroid)^2)
+      )
+    }
+    
+    variability_df <- data.frame(
+      cluster = cluster_labels_full,
+      dist = dist_to_centroid
+    ) %>%
+      group_by(cluster) %>%
+      summarise(
+        n_clicks = n(),
+        mean_dist = mean(dist),
+        sd_dist = sd(dist),
+        median_dist = median(dist),
+        .groups = "drop"
+      )
+    
+    write.csv(
+      variability_df,
+      file = file.path(dirs$data, "cluster_variability.csv"),
+      row.names = FALSE
+    )
+    
+    print(variability_df)
+  }
+  
+  # --------------------------------------------------
+  # Concatenated Spectrograms
+  # --------------------------------------------------
+  
+  cluster_ids <- sort(unique(cluster_labels_eval))
+  
+  spec_cols <- colorRampPalette(
+    c("white", "#FFD54F", "#FF9800", "#D84315", "#4E0012")
+  )(200)
+  
+  for (cl in cluster_ids) {
+    
+    cluster_idx <- which(cluster_labels_eval == cl)
+    
+    if (length(cluster_idx) == 0) next
+    
+    cluster_spec <- AllSpec_eval[cluster_idx, , drop = FALSE]
+    
+    out_file <- file.path(
+      dirs$spectrograms,
+      paste0(
+        "concatenated_spectrogram_eval_19_50kHz_",
+        k_label,
+        "_cluster_",
+        cl,
+        ".png"
+      )
+    )
+    
+    png(out_file, width = 1800, height = 900)
+    
+    image(
+      x = seq_len(nrow(cluster_spec)),
+      y = centroid_freq / 1000,
+      z = cluster_spec,
+      col = spec_cols,
+      xlab = "Click Number",
+      ylab = "Frequency (kHz)",
+      main = paste(
+        "Concatenated Click Spectrogram -",
+        analysis_name,
+        "- Cluster",
+        cl
+      ),
+      useRaster = TRUE,
+      axes = FALSE
+    )
+    
+    axis(1)
+    axis(2, at = seq(20, 50, by = 10))
+    box()
+    
+    dev.off()
+    
+    cat("Saved:", out_file, "\n")
+  }
+  
+  cat("Finished:", analysis_name, "\n")
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
