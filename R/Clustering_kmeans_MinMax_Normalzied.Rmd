@@ -36,7 +36,7 @@ library(cluster)
 # -----------------------------
 # Base Output Directory
 # -----------------------------
-base_output_dir <- "E:/Analysis/Clustering Output/MinMax_Normalized"
+base_output_dir <- "E:/Analysis/Clustering Output/MinMax_Normalized_ADRIFT003_Corrected"
 dir.create(base_output_dir, recursive = TRUE, showWarnings = FALSE)
 
 # -----------------------------
@@ -56,7 +56,7 @@ freq_max <- 50000
 # -----------------------------
 k_candidates <- 2:15
 chosen_k <- NULL
-k_label <-NULL #paste0("k_", chosen_k)
+k_label <- "global" #paste0("k_", chosen_k)
 
 max_clicks_per_event <- 200
 elbow_sample_cap <- 20000
@@ -450,7 +450,7 @@ get_nonzero_variance_columns <- function(mat) {
 ## Run K-Means Workflow for Multiple K Values
 
 ```{r}
-k_values_to_run <- 3:12
+k_values_to_run <- 2:12
 
 for (chosen_k in k_values_to_run) {
   

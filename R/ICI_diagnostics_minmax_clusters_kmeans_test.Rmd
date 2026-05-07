@@ -1,0 +1,798 @@
+---
+title: "ICI_diagnostics_minmax_clusters_kmeans"
+author: "Sarah Moseley"
+date: "2026-05-05"
+output: html_document
+---
+
+```{r}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(readr)
+
+```
+
+## User Settings
+
+```{r}
+
+# Folder from the spectra-only clustering script
+base_output_dir <- "E:/Analysis/Clustering Output/MinMax_Normalized"
+
+analysis_name <- "Min-Max Normalized"
+cluster_method <- "kmeans"
+
+# Use the k values you actually generated cluster assignments for
+k_values_to_check <- 2:12
+
+# We will use this later to remove obviously invalid intervals
+# This is just a placeholder for now; don't overinterpret yet.
+max_reasonable_ici_ms <- 1000
+
+```
+
+## Load the original combined Tukey spectra object
+
+```{r}
+
+combined_file <- file.choose()
+combined_tukey <- readRDS(combined_file)
+
+cat("Number of events:", length(combined_tukey), "\n")
+cat("Class of first event object:\n")
+print(class(combined_tukey[[1]]))
+
+cat("\nNames in first event object:\n")
+print(names(combined_tukey[[1]]))
+
+```
+
+## Inspect object dimensions and UID/source fields
+
+```{r}
+
+first_event <- combined_tukey[[1]]
+
+cat("First EventID:", first_event$EventID, "\n\n")
+
+cat("Length of freq:", length(first_event$freq), "\n")
+cat("Length of UID:", length(first_event$UID), "\n")
+cat("Dimensions of allSpec:", dim(first_event$allSpec), "\n")
+cat("Dimensions of allNoise:", dim(first_event$allNoise), "\n")
+
+cat("\nFirst 20 UID values:\n")
+print(head(first_event$UID, 20))
+
+cat("\nSourceFile field:\n")
+print(first_event$SourceFile)
+
+cat("\nClass of SourceFile:\n")
+print(class(first_event$SourceFile))
+
+cat("\nLength of SourceFile:\n")
+print(length(first_event$SourceFile))
+
+```
+
+## Summarize fields across all events
+
+```{r}
+
+event_structure_summary <- data.frame(
+  EventIndex = seq_along(combined_tukey),
+  EventID = sapply(combined_tukey, function(x) x$EventID),
+  n_freq = sapply(combined_tukey, function(x) length(x$freq)),
+  n_uid = sapply(combined_tukey, function(x) length(x$UID)),
+  allSpec_rows = sapply(combined_tukey, function(x) dim(x$allSpec)[1]),
+  allSpec_cols = sapply(combined_tukey, function(x) dim(x$allSpec)[2]),
+  sourcefile_length = sapply(combined_tukey, function(x) length(x$SourceFile)),
+  stringsAsFactors = FALSE
+)
+
+print(event_structure_summary)
+
+cat("\nDo UID counts match allSpec click columns for every event?\n")
+print(all(event_structure_summary$n_uid == event_structure_summary$allSpec_cols))
+
+cat("\nTotal clicks represented in combined_tukey:\n")
+print(sum(event_structure_summary$allSpec_cols))
+
+```
+
+7. Build click-level metadata table from combined_tukey
+
+```{r}
+
+click_metadata_from_tukey <- list()
+
+for (i in seq_along(combined_tukey)) {
+  
+  event_obj <- combined_tukey[[i]]
+  
+  n_clicks <- ncol(event_obj$allSpec)
+  
+  click_metadata_from_tukey[[i]] <- data.frame(
+    EventIndex = i,
+    EventID = event_obj$EventID,
+    ClickIndexWithinEvent = seq_len(n_clicks),
+    UID = as.character(event_obj$UID),
+    SourceFile = event_obj$SourceFile,
+    stringsAsFactors = FALSE
+  )
+}
+
+click_metadata_from_tukey <- do.call(rbind, click_metadata_from_tukey)
+
+cat("Total click rows:", nrow(click_metadata_from_tukey), "\n")
+cat("Number of events:", length(unique(click_metadata_from_tukey$EventID)), "\n\n")
+
+head(click_metadata_from_tukey)
+
+```
+
+## Check whether UID can be used for ordering
+
+```{r}
+
+uid_diagnostic <- click_metadata_from_tukey %>%
+  mutate(
+    UID_numeric = suppressWarnings(as.numeric(UID))
+  ) %>%
+  group_by(EventID) %>%
+  summarise(
+    n_clicks = n(),
+    n_missing_numeric_uid = sum(is.na(UID_numeric)),
+    uid_min = min(UID_numeric, na.rm = TRUE),
+    uid_max = max(UID_numeric, na.rm = TRUE),
+    uid_strictly_increasing_in_current_order = all(diff(UID_numeric) > 0, na.rm = TRUE),
+    uid_non_decreasing_in_current_order = all(diff(UID_numeric) >= 0, na.rm = TRUE),
+    median_uid_diff = median(diff(UID_numeric), na.rm = TRUE),
+    min_uid_diff = min(diff(UID_numeric), na.rm = TRUE),
+    max_uid_diff = max(diff(UID_numeric), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(uid_diagnostic)
+
+cat("\nHow many events have UID increasing in the current click order?\n")
+print(table(uid_diagnostic$uid_strictly_increasing_in_current_order))
+
+cat("\nSummary of median UID differences across events:\n")
+print(summary(uid_diagnostic$median_uid_diff))
+
+```
+
+## Locate possible source databases
+
+```{r}
+
+possible_database_dirs <- c(
+  "E:/Analysis/Useable Databases",
+  "E:/Analysis/CleanAcousticStudies"
+)
+
+existing_database_dirs <- possible_database_dirs[dir.exists(possible_database_dirs)]
+
+cat("Existing search directories:\n")
+print(existing_database_dirs)
+
+possible_database_files <- list()
+
+for (search_dir in existing_database_dirs) {
+  
+  possible_database_files[[search_dir]] <- list.files(
+    path = search_dir,
+    pattern = "\\.(rds|RDS|RData|rdata|sqlite|sqlite3|db|csv)$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+}
+
+possible_database_files <- unlist(possible_database_files, use.names = FALSE)
+
+cat("\nNumber of possible database/source files found:", length(possible_database_files), "\n\n")
+
+possible_database_df <- data.frame(
+  File = possible_database_files,
+  FileName = basename(possible_database_files),
+  Folder = dirname(possible_database_files),
+  stringsAsFactors = FALSE
+) %>%
+  filter(
+    str_detect(
+      tolower(FileName),
+      "acoustic|study|database|pam|adrift|click|det|event|useable|usable"
+    )
+  )
+
+print(possible_database_df)
+
+```
+
+## Inspect one source SQLite database
+
+```{r}
+
+if (!requireNamespace("DBI", quietly = TRUE)) {
+  install.packages("DBI")
+}
+
+if (!requireNamespace("RSQLite", quietly = TRUE)) {
+  install.packages("RSQLite")
+}
+
+library(DBI)
+library(RSQLite)
+
+test_db <- "E:/Analysis/Useable Databases/ADRIFT_003 - Clean.sqlite3"
+
+cat("Testing database:\n")
+print(test_db)
+
+con <- dbConnect(RSQLite::SQLite(), test_db)
+
+db_tables <- dbListTables(con)
+
+cat("\nTables in database:\n")
+print(db_tables)
+
+# Summarize columns in each table
+table_column_summary <- lapply(db_tables, function(tbl) {
+  
+  cols <- dbListFields(con, tbl)
+  
+  data.frame(
+    Table = tbl,
+    Column = cols,
+    stringsAsFactors = FALSE
+  )
+  
+}) %>%
+  bind_rows()
+
+cat("\nColumn summary:\n")
+print(table_column_summary)
+
+# Look for tables/columns likely related to click timing
+candidate_columns <- table_column_summary %>%
+  filter(
+    str_detect(
+      tolower(Column),
+      "uid|utc|time|sample|start|peak|millis|milli|sec|date"
+    )
+  )
+
+cat("\nCandidate UID/time columns:\n")
+print(candidate_columns)
+
+dbDisconnect(con)
+
+```
+
+## Find which SQLite table contains the Tukey UIDs
+
+```{r}
+
+con <- dbConnect(RSQLite::SQLite(), test_db)
+
+# Use first event's Tukey UIDs as test IDs
+test_uids <- head(as.numeric(combined_tukey[[1]]$UID), 20)
+uid_list_sql <- paste(test_uids, collapse = ",")
+
+cat("Testing these Tukey UIDs:\n")
+print(test_uids)
+
+# Tables that contain a UID column
+uid_tables <- table_column_summary %>%
+  filter(Column == "UID") %>%
+  pull(Table) %>%
+  unique()
+
+cat("\nTables with UID column:\n")
+print(uid_tables)
+
+uid_match_summary <- list()
+
+for (tbl in uid_tables) {
+  
+  query <- paste0(
+    "SELECT COUNT(*) AS n_matches FROM `", tbl, 
+    "` WHERE UID IN (", uid_list_sql, ")"
+  )
+  
+  n_matches <- dbGetQuery(con, query)$n_matches
+  
+  uid_match_summary[[tbl]] <- data.frame(
+    Table = tbl,
+    n_matches = n_matches
+  )
+}
+
+uid_match_summary <- bind_rows(uid_match_summary)
+
+cat("\nUID match summary:\n")
+print(uid_match_summary)
+
+dbDisconnect(con)
+
+```
+
+## Preview matching rows from likely click tables
+
+```{r}
+
+con <- dbConnect(RSQLite::SQLite(), test_db)
+
+matching_tables <- uid_match_summary %>%
+  filter(n_matches > 0) %>%
+  pull(Table)
+
+for (tbl in matching_tables) {
+  
+  cat("\n============================\n")
+  cat("MATCHING TABLE:", tbl, "\n")
+  cat("============================\n")
+  
+  query <- paste0(
+    "SELECT * FROM `", tbl, 
+    "` WHERE UID IN (", uid_list_sql, ") LIMIT 10"
+  )
+  
+  preview <- dbGetQuery(con, query)
+  
+  print(preview)
+}
+
+dbDisconnect(con)
+
+```
+
+## Inspect timing fields from the matching table
+
+```{r}
+
+con <- dbConnect(RSQLite::SQLite(), test_db)
+
+# If only one table matched, use that.
+# If multiple matched, this will show us all of them.
+matching_tables <- uid_match_summary %>%
+  filter(n_matches > 0) %>%
+  pull(Table)
+
+print(matching_tables)
+
+for (tbl in matching_tables) {
+  
+  cat("\n============================\n")
+  cat("TIMING FIELD CHECK:", tbl, "\n")
+  cat("============================\n")
+  
+  table_fields <- dbListFields(con, tbl)
+  print(table_fields)
+  
+  timing_cols <- intersect(
+    c("Id", "UID", "UTC", "UTCMilliseconds", "StartSample", "Sample", "ChannelBitmap"),
+    table_fields
+  )
+  
+  query <- paste0(
+    "SELECT ",
+    paste(paste0("`", timing_cols, "`"), collapse = ", "),
+    " FROM `", tbl, "` WHERE UID IN (",
+    uid_list_sql,
+    ") ORDER BY UID LIMIT 20"
+  )
+  
+  timing_preview <- dbGetQuery(con, query)
+  
+  print(timing_preview)
+  
+  cat("\nStructure:\n")
+  print(str(timing_preview))
+}
+
+dbDisconnect(con)
+
+```
+
+## Force-print UTCMilliseconds for matching UIDs
+
+```{r}
+
+con <- dbConnect(RSQLite::SQLite(), test_db)
+
+matching_tables <- uid_match_summary %>%
+  filter(n_matches > 0) %>%
+  pull(Table)
+
+for (tbl in matching_tables) {
+  
+  cat("\n============================\n")
+  cat("TABLE:", tbl, "\n")
+  cat("============================\n")
+  
+  table_fields <- dbListFields(con, tbl)
+  
+  cat("Fields in this table:\n")
+  print(table_fields)
+  
+  if ("UTCMilliseconds" %in% table_fields) {
+    
+    query <- paste0(
+      "SELECT UID, UTC, UTCMilliseconds ",
+      "FROM `", tbl, "` ",
+      "WHERE UID IN (", uid_list_sql, ") ",
+      "ORDER BY UTCMilliseconds ",
+      "LIMIT 20"
+    )
+    
+    timing_preview <- dbGetQuery(con, query)
+    
+    cat("\nTiming preview using UTCMilliseconds:\n")
+    print(timing_preview)
+    
+    cat("\nColumn names:\n")
+    print(names(timing_preview))
+    
+    cat("\nStructure:\n")
+    str(timing_preview)
+    
+    cat("\nDifferences between consecutive UTCMilliseconds:\n")
+    print(diff(timing_preview$UTCMilliseconds))
+    
+  } else {
+    
+    cat("No UTCMilliseconds column found in this table.\n")
+    
+    query <- paste0(
+      "SELECT UID, UTC ",
+      "FROM `", tbl, "` ",
+      "WHERE UID IN (", uid_list_sql, ") ",
+      "ORDER BY UID ",
+      "LIMIT 20"
+    )
+    
+    timing_preview <- dbGetQuery(con, query)
+    print(timing_preview)
+  }
+}
+
+dbDisconnect(con)
+
+```
+
+## Test-clean PAMGuard UTC strings
+
+```{r}
+
+clean_pamguard_utc <- function(x) {
+  
+  # Some UTC strings contain ".character(0)" before the milliseconds.
+  # Example:
+  # "2021-07-30 12:28:29.character(0)187"
+  # should become:
+  # "2021-07-30 12:28:29.187"
+  
+  x_clean <- gsub("character\\(0\\)", "", x)
+  
+  # If a row has no decimal milliseconds, add .000
+  has_decimal <- grepl("\\.\\d+$", x_clean)
+  x_clean[!has_decimal] <- paste0(x_clean[!has_decimal], ".000")
+  
+  as.POSIXct(
+    x_clean,
+    format = "%Y-%m-%d %H:%M:%OS",
+    tz = "UTC"
+  )
+}
+
+# -----------------------------
+# Test parsed UTC ordering
+# -----------------------------
+
+con <- dbConnect(RSQLite::SQLite(), test_db)
+
+timing_test <- dbGetQuery(
+  con,
+  paste0(
+    "SELECT Id, UID, UTC, UTCMilliseconds, EventId, ClickNo, parentID, parentUID ",
+    "FROM Click_Detector_OfflineClicks ",
+    "WHERE UID IN (", uid_list_sql, ") ",
+    "ORDER BY Id ",
+    "LIMIT 20"
+  )
+)
+
+dbDisconnect(con)
+
+timing_test <- timing_test %>%
+  mutate(
+    UTC_clean = gsub("character\\(0\\)", "", UTC),
+    UTC_parsed = clean_pamguard_utc(UTC)
+  ) %>%
+  arrange(UTC_parsed, UID) %>%
+  mutate(
+    ICI_ms_test = as.numeric(
+      difftime(lead(UTC_parsed), UTC_parsed, units = "secs")
+    ) * 1000
+  )
+
+print(timing_test)
+
+cat("\nStructure of parsed UTC:\n")
+str(timing_test$UTC_parsed)
+
+cat("\nTest ICI values in milliseconds:\n")
+print(timing_test$ICI_ms_test)
+
+```
+
+## Add DriftID to the Tukey click metadata
+
+```{r}
+
+click_metadata_from_tukey <- click_metadata_from_tukey %>%
+  mutate(
+    DriftID = sub("_Event_.*$", "", EventID),
+    UID = as.character(UID)
+  )
+
+cat("Unique DriftIDs in combined_tukey:\n")
+print(sort(unique(click_metadata_from_tukey$DriftID)))
+
+cat("\nNumber of clicks by DriftID:\n")
+clicks_by_drift <- click_metadata_from_tukey %>%
+  count(DriftID, name = "n_tukey_clicks") %>%
+  arrange(DriftID)
+
+print(clicks_by_drift)
+
+cat("\nTotal Tukey clicks:\n")
+print(sum(clicks_by_drift$n_tukey_clicks))
+
+```
+
+## Extract click timing from all matching SQLite databases
+
+```{r}
+
+sqlite_dir <- "E:/Analysis/Useable Databases"
+
+extract_timing_for_drift <- function(drift_id, uid_vec, sqlite_dir) {
+  
+  db_file <- file.path(sqlite_dir, paste0(drift_id, " - Clean.sqlite3"))
+  
+  if (!file.exists(db_file)) {
+    warning("Missing SQLite database for ", drift_id, ": ", db_file)
+    return(NULL)
+  }
+  
+  cat("\n============================\n")
+  cat("Extracting timing for", drift_id, "\n")
+  cat("Database:", db_file, "\n")
+  cat("Number of Tukey UIDs:", length(uid_vec), "\n")
+  cat("============================\n")
+  
+  con <- dbConnect(RSQLite::SQLite(), db_file)
+  
+  uid_vec <- unique(as.numeric(uid_vec))
+  uid_vec <- uid_vec[!is.na(uid_vec)]
+  
+  # Query in chunks to avoid giant SQL queries
+  chunk_size <- 1000
+  uid_chunks <- split(uid_vec, ceiling(seq_along(uid_vec) / chunk_size))
+  
+  timing_chunks <- list()
+  
+  for (j in seq_along(uid_chunks)) {
+    
+    uid_sql <- paste(uid_chunks[[j]], collapse = ",")
+    
+    query <- paste0(
+      "SELECT ",
+      "Id, UID, UTC, UTCMilliseconds, EventId, ClickNo, parentID, parentUID, BinaryFile, Channels ",
+      "FROM Click_Detector_OfflineClicks ",
+      "WHERE UID IN (", uid_sql, ")"
+    )
+    
+    timing_chunks[[j]] <- dbGetQuery(con, query)
+  }
+  
+  dbDisconnect(con)
+  
+  timing_df <- bind_rows(timing_chunks)
+  
+  if (nrow(timing_df) == 0) {
+    warning("No matching timing rows found for ", drift_id)
+    return(NULL)
+  }
+  
+  timing_df <- timing_df %>%
+    mutate(
+      DriftID = drift_id,
+      UID = as.character(UID),
+      UTC_clean = gsub("character\\(0\\)", "", UTC),
+      UTC_parsed = clean_pamguard_utc(UTC)
+    )
+  
+  cat("Rows extracted:", nrow(timing_df), "\n")
+  cat("Rows with parsed UTC missing:", sum(is.na(timing_df$UTC_parsed)), "\n")
+  
+  return(timing_df)
+}
+
+# Split Tukey UIDs by DriftID
+uids_by_drift <- split(
+  click_metadata_from_tukey$UID,
+  click_metadata_from_tukey$DriftID
+)
+
+all_timing_list <- list()
+
+for (drift_id in names(uids_by_drift)) {
+  
+  all_timing_list[[drift_id]] <- extract_timing_for_drift(
+    drift_id = drift_id,
+    uid_vec = uids_by_drift[[drift_id]],
+    sqlite_dir = sqlite_dir
+  )
+}
+
+click_timing_from_sqlite <- bind_rows(all_timing_list)
+
+cat("\n============================\n")
+cat("Timing extraction complete\n")
+cat("============================\n")
+
+cat("Total timing rows extracted:", nrow(click_timing_from_sqlite), "\n")
+cat("Unique DriftIDs extracted:", length(unique(click_timing_from_sqlite$DriftID)), "\n")
+cat("Rows with missing parsed UTC:", sum(is.na(click_timing_from_sqlite$UTC_parsed)), "\n")
+
+timing_by_drift <- click_timing_from_sqlite %>%
+  count(DriftID, name = "n_timing_rows") %>%
+  arrange(DriftID)
+
+print(timing_by_drift)
+
+```
+
+## Check timing join coverage
+
+```{r}
+
+click_metadata_with_time <- click_metadata_from_tukey %>%
+  left_join(
+    click_timing_from_sqlite %>%
+      select(
+        DriftID,
+        UID,
+        SQL_Id = Id,
+        UTC,
+        UTC_clean,
+        UTC_parsed,
+        UTCMilliseconds,
+        SQL_EventId = EventId,
+        SQL_ClickNo = ClickNo,
+        parentID,
+        parentUID,
+        BinaryFile,
+        Channels
+      ),
+    by = c("DriftID", "UID")
+  )
+
+cat("Rows in Tukey click metadata:", nrow(click_metadata_from_tukey), "\n")
+cat("Rows after timing join:", nrow(click_metadata_with_time), "\n")
+cat("Rows missing UTC_parsed:", sum(is.na(click_metadata_with_time$UTC_parsed)), "\n")
+
+join_coverage_by_drift <- click_metadata_with_time %>%
+  group_by(DriftID) %>%
+  summarise(
+    n_tukey_clicks = n(),
+    n_with_time = sum(!is.na(UTC_parsed)),
+    n_missing_time = sum(is.na(UTC_parsed)),
+    percent_with_time = 100 * n_with_time / n_tukey_clicks,
+    .groups = "drop"
+  ) %>%
+  arrange(DriftID)
+
+print(join_coverage_by_drift)
+
+cat("\nDuplicate DriftID + UID rows after join:\n")
+duplicate_join_rows <- click_metadata_with_time %>%
+  count(DriftID, UID) %>%
+  filter(n > 1)
+
+print(duplicate_join_rows)
+
+cat("\nExample joined rows:\n")
+click_metadata_with_time %>%
+  select(EventID, DriftID, ClickIndexWithinEvent, UID, UTC_clean, UTC_parsed, SQL_EventId, SQL_ClickNo) %>%
+  head(20) %>%
+  print()
+
+```
+
+## Diagnose duplicate UIDs across Tukey events
+
+```{r}
+
+duplicate_uid_summary <- click_metadata_from_tukey %>%
+  count(DriftID, UID, name = "n_tukey_rows") %>%
+  filter(n_tukey_rows > 1) %>%
+  arrange(DriftID, UID)
+
+cat("Number of duplicated DriftID + UID combinations:\n")
+print(nrow(duplicate_uid_summary))
+
+cat("\nDuplicated UID combinations by DriftID:\n")
+duplicate_uid_by_drift <- duplicate_uid_summary %>%
+  group_by(DriftID) %>%
+  summarise(
+    n_duplicated_uids = n(),
+    max_duplicate_count = max(n_tukey_rows),
+    .groups = "drop"
+  )
+
+print(duplicate_uid_by_drift)
+
+cat("\nWhich EventIDs share duplicated UIDs?\n")
+
+duplicate_uid_event_map <- click_metadata_from_tukey %>%
+  semi_join(
+    duplicate_uid_summary,
+    by = c("DriftID", "UID")
+  ) %>%
+  group_by(DriftID, UID) %>%
+  summarise(
+    EventIDs = paste(sort(unique(EventID)), collapse = "; "),
+    n_event_ids = n_distinct(EventID),
+    n_rows = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(DriftID, UID)
+
+print(head(duplicate_uid_event_map, 30))
+
+cat("\nSummary of duplicated UID sharing patterns:\n")
+duplicate_sharing_summary <- duplicate_uid_event_map %>%
+  count(DriftID, EventIDs, n_event_ids, name = "n_shared_uids") %>%
+  arrange(DriftID, desc(n_shared_uids))
+
+print(duplicate_sharing_summary)
+
+# Save diagnostics
+ici_output_dir <- file.path(base_output_dir, analysis_name, "ICI_Diagnostics")
+dir.create(ici_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+write.csv(
+  duplicate_uid_summary,
+  file = file.path(ici_output_dir, "duplicate_uid_summary.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  duplicate_uid_event_map,
+  file = file.path(ici_output_dir, "duplicate_uid_event_map.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  duplicate_sharing_summary,
+  file = file.path(ici_output_dir, "duplicate_uid_sharing_summary.csv"),
+  row.names = FALSE
+)
+
+```
+
+
+
+
+
+
+

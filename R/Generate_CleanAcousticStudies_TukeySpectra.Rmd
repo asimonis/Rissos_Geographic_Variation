@@ -337,14 +337,1002 @@ cat("Combined Tukey spectra saved to:\n", combined_output_file, "\n", sep = "")
 
 ```
 
+## Deep Dive: ADRIFT_003 Event 001 vs Event 002
 
+## Confirm the two files actually exist as separate files
 
+```{r}
 
+library(dplyr)
 
+baseDir <- "E:/Analysis"
 
+cleanStudyDir <- file.path(baseDir, "CleanAcousticStudies")
+tukeySpectraBaseDir <- file.path(baseDir, "TukeySpectra")
 
+target_drift <- "ADRIFT_003"
+target_event_nums <- c(1, 2)
 
+target_event_labels <- sprintf(
+  "%s_Event_%03d",
+  target_drift,
+  target_event_nums
+)
 
+target_files <- file.path(
+  tukeySpectraBaseDir,
+  target_drift,
+  sprintf("Event_%03d", target_event_nums),
+  sprintf(
+    "%s_Event_%03d_Tukey_Spectra.rds",
+    target_drift,
+    target_event_nums
+  )
+)
+
+target_file_info <- file.info(target_files)
+
+target_file_df <- data.frame(
+  EventLabel = target_event_labels,
+  File = target_files,
+  Exists = file.exists(target_files),
+  SizeBytes = target_file_info$size,
+  ModifiedTime = target_file_info$mtime,
+  stringsAsFactors = FALSE
+)
+
+print(target_file_df)
+
+if (!all(target_file_df$Exists)) {
+  stop("One or both ADRIFT_003 target Tukey files are missing. Stop here.")
+}
+
+cat("\nFile MD5 hashes:\n")
+print(tools::md5sum(target_files))
+
+```
+
+## Check whether ADRIFT_003 has more than one offline event
+
+```{r}
+
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+target_drift <- "ADRIFT_003"
+
+db_file <- file.path(
+  baseDir,
+  "Useable Databases",
+  paste0(target_drift, " - Clean.sqlite3")
+)
+
+cat("Checking database:\n")
+print(db_file)
+
+con <- dbConnect(RSQLite::SQLite(), db_file)
+
+offline_events <- dbGetQuery(
+  con,
+  "SELECT * FROM Click_Detector_OfflineEvents"
+)
+
+offline_clicks <- dbGetQuery(
+  con,
+  "SELECT UID, EventId, UTC, UTCMilliseconds, ClickNo, parentID, parentUID FROM Click_Detector_OfflineClicks"
+)
+
+dbDisconnect(con)
+
+cat("\nOffline events table:\n")
+print(offline_events)
+
+cat("\nOffline clicks per EventId:\n")
+clicks_per_sql_event <- offline_clicks %>%
+  count(EventId, name = "n_clicks") %>%
+  arrange(EventId)
+
+print(clicks_per_sql_event)
+
+cat("\nUnique EventIds in OfflineClicks:\n")
+print(sort(unique(offline_clicks$EventId)))
+
+```
+
+## Compare each Tukey file against SQL EventId 1 and 2
+
+```{r}
+
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+baseDir <- "E:/Analysis"
+tukeySpectraBaseDir <- file.path(baseDir, "TukeySpectra")
+target_drift <- "ADRIFT_003"
+
+event_001_file <- file.path(
+  tukeySpectraBaseDir,
+  target_drift,
+  "Event_001",
+  "ADRIFT_003_Event_001_Tukey_Spectra.rds"
+)
+
+event_002_file <- file.path(
+  tukeySpectraBaseDir,
+  target_drift,
+  "Event_002",
+  "ADRIFT_003_Event_002_Tukey_Spectra.rds"
+)
+
+tukey_001 <- readRDS(event_001_file)
+tukey_002 <- readRDS(event_002_file)
+
+db_file <- file.path(
+  baseDir,
+  "Useable Databases",
+  paste0(target_drift, " - Clean.sqlite3")
+)
+
+con <- dbConnect(RSQLite::SQLite(), db_file)
+
+sql_clicks <- dbGetQuery(
+  con,
+  "SELECT UID, EventId FROM Click_Detector_OfflineClicks"
+)
+
+dbDisconnect(con)
+
+sql_event_uid_sets <- split(
+  as.character(sql_clicks$UID),
+  sql_clicks$EventId
+)
+
+compare_tukey_to_sql_event <- function(tukey_obj, tukey_label, sql_event_uid_sets) {
+  
+  tukey_uids <- as.character(tukey_obj$UID)
+  
+  bind_rows(
+    lapply(names(sql_event_uid_sets), function(sql_event_id) {
+      
+      sql_uids <- as.character(sql_event_uid_sets[[sql_event_id]])
+      
+      data.frame(
+        TukeyFileLabel = tukey_label,
+        TukeyNumUID = length(tukey_uids),
+        TukeyNumUniqueUID = length(unique(tukey_uids)),
+        SQLEventId = sql_event_id,
+        SQLNumUID = length(sql_uids),
+        SQLNumUniqueUID = length(unique(sql_uids)),
+        OverlapUIDs = sum(tukey_uids %in% sql_uids),
+        PercentTukeyInSQLEvent = 100 * sum(tukey_uids %in% sql_uids) / length(tukey_uids),
+        PercentSQLEventInTukey = 100 * sum(sql_uids %in% tukey_uids) / length(sql_uids),
+        SameUIDSet = setequal(tukey_uids, sql_uids),
+        stringsAsFactors = FALSE
+      )
+    })
+  )
+}
+
+uid_match_check <- bind_rows(
+  compare_tukey_to_sql_event(
+    tukey_001,
+    "ADRIFT_003_Event_001_TukeyFile",
+    sql_event_uid_sets
+  ),
+  compare_tukey_to_sql_event(
+    tukey_002,
+    "ADRIFT_003_Event_002_TukeyFile",
+    sql_event_uid_sets
+  )
+)
+
+print(uid_match_check)
+
+```
+
+## Test which evNum maps to each SQL EventId
+
+```{r}
+
+library(PAMpal)
+library(dplyr)
+library(DBI)
+library(RSQLite)
+library(here)
+
+# Make sure Tukey function is available
+source(here("R", "TukeySmoothing.R"))
+
+baseDir <- "E:/Analysis"
+cleanStudyDir <- file.path(baseDir, "CleanAcousticStudies")
+tukeySpectraBaseDir <- file.path(baseDir, "TukeySpectra")
+
+target_drift <- "ADRIFT_003"
+channel <- 1
+
+wl <- 1024
+tukeyMedian <- 5
+tukeyHanningSize <- 5
+
+cleanStudyFile <- file.path(
+  cleanStudyDir,
+  sprintf("%s_CleanAcousticStudy.rds", target_drift)
+)
+
+db_file <- file.path(
+  baseDir,
+  "Useable Databases",
+  paste0(target_drift, " - Clean.sqlite3")
+)
+
+cat("Clean study file:\n")
+print(cleanStudyFile)
+
+cat("\nDatabase file:\n")
+print(db_file)
+
+if (!file.exists(cleanStudyFile)) {
+  stop("Clean acoustic study file does not exist: ", cleanStudyFile)
+}
+
+if (!file.exists(db_file)) {
+  stop("SQLite database file does not exist: ", db_file)
+}
+
+# -----------------------------
+# Load clean acoustic study
+# -----------------------------
+
+study_003 <- readRDS(cleanStudyFile)
+
+cat("\nLoaded clean study class:\n")
+print(class(study_003))
+
+# -----------------------------
+# Load SQL event UID sets
+# -----------------------------
+
+con <- dbConnect(RSQLite::SQLite(), db_file)
+
+sql_clicks_003 <- dbGetQuery(
+  con,
+  "SELECT UID, EventId FROM Click_Detector_OfflineClicks"
+)
+
+dbDisconnect(con)
+
+sql_event_uid_sets <- split(
+  as.character(sql_clicks_003$UID),
+  sql_clicks_003$EventId
+)
+
+cat("\nSQL click counts by EventId:\n")
+print(
+  sql_clicks_003 %>%
+    count(EventId, name = "n_clicks") %>%
+    arrange(EventId)
+)
+
+# -----------------------------
+# Test candidate evNum values
+# -----------------------------
+
+test_tukey_evnum <- function(ev_num) {
+  
+  cat("\n============================\n")
+  cat("Testing evNum =", ev_num, "\n")
+  cat("============================\n")
+  
+  result <- tryCatch(
+    {
+      tukey_obj <- calculateAverageSpectra_tukey(
+        study_003,
+        evNum = ev_num,
+        channel = channel,
+        tukeyMedian = tukeyMedian,
+        tukeyHanningSize = tukeyHanningSize,
+        plot = FALSE,
+        wl = wl
+      )
+      
+      tukey_uids <- as.character(tukey_obj$UID)
+      
+      comparison <- bind_rows(
+        lapply(names(sql_event_uid_sets), function(sql_event_id) {
+          
+          sql_uids <- as.character(sql_event_uid_sets[[sql_event_id]])
+          
+          data.frame(
+            evNum_tested = ev_num,
+            TukeyNumUID = length(tukey_uids),
+            TukeyNumUniqueUID = length(unique(tukey_uids)),
+            SQLEventId = sql_event_id,
+            SQLNumUID = length(sql_uids),
+            OverlapUIDs = sum(tukey_uids %in% sql_uids),
+            PercentTukeyInSQLEvent = 100 * sum(tukey_uids %in% sql_uids) / length(tukey_uids),
+            PercentSQLEventInTukey = 100 * sum(sql_uids %in% tukey_uids) / length(sql_uids),
+            SameUIDSet = setequal(tukey_uids, sql_uids),
+            Error = NA_character_,
+            stringsAsFactors = FALSE
+          )
+        })
+      )
+      
+      comparison
+    },
+    error = function(e) {
+      data.frame(
+        evNum_tested = ev_num,
+        TukeyNumUID = NA_integer_,
+        TukeyNumUniqueUID = NA_integer_,
+        SQLEventId = NA_character_,
+        SQLNumUID = NA_integer_,
+        OverlapUIDs = NA_integer_,
+        PercentTukeyInSQLEvent = NA_real_,
+        PercentSQLEventInTukey = NA_real_,
+        SameUIDSet = NA,
+        Error = conditionMessage(e),
+        stringsAsFactors = FALSE
+      )
+    }
+  )
+  
+  return(result)
+}
+
+candidate_evnums <- 1:5
+
+evnum_mapping_results <- bind_rows(
+  lapply(candidate_evnums, test_tukey_evnum)
+)
+
+print(evnum_mapping_results)
+
+```
+
+## Back up the existing bad ADRIFT_003 files
+
+```{r}
+
+backup_dir <- file.path(
+  tukeySpectraBaseDir,
+  target_drift,
+  "BACKUP_bad_duplicate_Event001_Event002"
+)
+
+dir.create(backup_dir, recursive = TRUE, showWarnings = FALSE)
+
+backup_files <- file.path(
+  backup_dir,
+  basename(target_files)
+)
+
+backup_result <- file.copy(
+  from = target_files,
+  to = backup_files,
+  overwrite = TRUE
+)
+
+backup_df <- data.frame(
+  OriginalFile = target_files,
+  BackupFile = backup_files,
+  BackupSucceeded = backup_result,
+  OriginalMD5 = as.character(tools::md5sum(target_files)),
+  BackupMD5 = as.character(tools::md5sum(backup_files)),
+  stringsAsFactors = FALSE
+)
+
+print(backup_df)
+
+if (!all(backup_df$BackupSucceeded)) {
+  stop("Backup failed for one or more files. Do not continue.")
+}
+
+if (!all(backup_df$OriginalMD5 == backup_df$BackupMD5)) {
+  stop("Backup MD5 does not match original. Do not continue.")
+}
+
+cat("\nBackup complete. Safe to regenerate files.\n")
+
+```
+
+## Regenerate ADRIFT_003 Event 001 and Event 002
+
+```{r}
+
+library(PAMpal)
+library(dplyr)
+library(here)
+
+source(here("R", "TukeySmoothing.R"))
+
+target_drift <- "ADRIFT_003"
+channel <- 1
+
+wl <- 1024
+tukeyMedian <- 5
+tukeyHanningSize <- 5
+
+cleanStudyFile <- file.path(
+  cleanStudyDir,
+  sprintf("%s_CleanAcousticStudy.rds", target_drift)
+)
+
+if (!file.exists(cleanStudyFile)) {
+  stop("Missing clean study file: ", cleanStudyFile)
+}
+
+study_003 <- readRDS(cleanStudyFile)
+
+regenerate_tukey_event <- function(ev_num) {
+  
+  event_folder_name <- sprintf("Event_%03d", ev_num)
+  event_label <- sprintf("%s_Event_%03d", target_drift, ev_num)
+  
+  event_tukey_dir <- file.path(
+    tukeySpectraBaseDir,
+    target_drift,
+    event_folder_name
+  )
+  
+  dir.create(event_tukey_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  tukey_file <- file.path(
+    event_tukey_dir,
+    sprintf("%s_Event_%03d_Tukey_Spectra.rds", target_drift, ev_num)
+  )
+  
+  cat("\n============================\n")
+  cat("Regenerating", event_label, "\n")
+  cat("Output file:", tukey_file, "\n")
+  cat("============================\n")
+  
+  tukey_spectra <- calculateAverageSpectra_tukey(
+    study_003,
+    evNum = ev_num,
+    channel = channel,
+    tukeyMedian = tukeyMedian,
+    tukeyHanningSize = tukeyHanningSize,
+    plot = FALSE,
+    wl = wl
+  )
+  
+  tukey_spectra$EventID <- event_label
+  tukey_spectra$SourceFile <- tukey_file
+  
+  saveRDS(tukey_spectra, tukey_file)
+  
+  data.frame(
+    EventID = event_label,
+    File = tukey_file,
+    NumUID = length(tukey_spectra$UID),
+    NumUniqueUID = length(unique(tukey_spectra$UID)),
+    DimAllSpecRows = dim(tukey_spectra$allSpec)[1],
+    DimAllSpecCols = dim(tukey_spectra$allSpec)[2],
+    MD5 = as.character(tools::md5sum(tukey_file)),
+    stringsAsFactors = FALSE
+  )
+}
+
+regenerated_summary <- dplyr::bind_rows(
+  regenerate_tukey_event(1),
+  regenerate_tukey_event(2)
+)
+
+print(regenerated_summary)
+
+```
+
+## Verify regenerated files against SQL events
+
+```{r}
+
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+target_drift <- "ADRIFT_003"
+
+event_001_file <- file.path(
+  tukeySpectraBaseDir,
+  target_drift,
+  "Event_001",
+  "ADRIFT_003_Event_001_Tukey_Spectra.rds"
+)
+
+event_002_file <- file.path(
+  tukeySpectraBaseDir,
+  target_drift,
+  "Event_002",
+  "ADRIFT_003_Event_002_Tukey_Spectra.rds"
+)
+
+tukey_001_new <- readRDS(event_001_file)
+tukey_002_new <- readRDS(event_002_file)
+
+# Reload SQL UID sets to make this chunk self-contained
+db_file <- file.path(
+  baseDir,
+  "Useable Databases",
+  paste0(target_drift, " - Clean.sqlite3")
+)
+
+con <- dbConnect(RSQLite::SQLite(), db_file)
+
+sql_clicks_003 <- dbGetQuery(
+  con,
+  "SELECT UID, EventId FROM Click_Detector_OfflineClicks"
+)
+
+dbDisconnect(con)
+
+sql_event_uid_sets <- split(
+  as.character(sql_clicks_003$UID),
+  sql_clicks_003$EventId
+)
+
+compare_tukey_to_sql_event <- function(tukey_obj, tukey_label, sql_event_uid_sets) {
+  
+  tukey_uids <- as.character(tukey_obj$UID)
+  
+  bind_rows(
+    lapply(names(sql_event_uid_sets), function(sql_event_id) {
+      
+      sql_uids <- as.character(sql_event_uid_sets[[sql_event_id]])
+      
+      data.frame(
+        TukeyFileLabel = tukey_label,
+        TukeyNumUID = length(tukey_uids),
+        TukeyNumUniqueUID = length(unique(tukey_uids)),
+        SQLEventId = sql_event_id,
+        SQLNumUID = length(sql_uids),
+        SQLNumUniqueUID = length(unique(sql_uids)),
+        OverlapUIDs = sum(tukey_uids %in% sql_uids),
+        PercentTukeyInSQLEvent = 100 * sum(tukey_uids %in% sql_uids) / length(tukey_uids),
+        PercentSQLEventInTukey = 100 * sum(sql_uids %in% tukey_uids) / length(sql_uids),
+        SameUIDSet = setequal(tukey_uids, sql_uids),
+        stringsAsFactors = FALSE
+      )
+    })
+  )
+}
+
+verification_after_regen <- dplyr::bind_rows(
+  compare_tukey_to_sql_event(
+    tukey_001_new,
+    "ADRIFT_003_Event_001_REGENERATED",
+    sql_event_uid_sets
+  ),
+  compare_tukey_to_sql_event(
+    tukey_002_new,
+    "ADRIFT_003_Event_002_REGENERATED",
+    sql_event_uid_sets
+  )
+)
+
+print(verification_after_regen)
+
+cat("\nNew MD5 hashes:\n")
+print(tools::md5sum(c(event_001_file, event_002_file)))
+
+cat("\nAre regenerated Event_001 and Event_002 byte-identical?\n")
+print(identical(
+  as.character(tools::md5sum(event_001_file)),
+  as.character(tools::md5sum(event_002_file))
+))
+
+```
+
+## Back up the existing combined file
+
+```{r}
+
+combined_output_file <- file.path(
+  tukeySpectraBaseDir,
+  "Combined_Tukey_Spectra.rds"
+)
+
+combined_backup_dir <- file.path(
+  tukeySpectraBaseDir,
+  "BACKUP_combined_before_ADRIFT003_fix"
+)
+
+dir.create(combined_backup_dir, recursive = TRUE, showWarnings = FALSE)
+
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+combined_backup_file <- file.path(
+  combined_backup_dir,
+  paste0("Combined_Tukey_Spectra_before_ADRIFT003_fix_", timestamp, ".rds")
+)
+
+if (file.exists(combined_output_file)) {
+  
+  backup_ok <- file.copy(
+    from = combined_output_file,
+    to = combined_backup_file,
+    overwrite = FALSE
+  )
+  
+  backup_df <- data.frame(
+    OriginalFile = combined_output_file,
+    BackupFile = combined_backup_file,
+    BackupSucceeded = backup_ok,
+    OriginalMD5 = as.character(tools::md5sum(combined_output_file)),
+    BackupMD5 = as.character(tools::md5sum(combined_backup_file)),
+    stringsAsFactors = FALSE
+  )
+  
+  print(backup_df)
+  
+  if (!backup_ok) {
+    stop("Combined file backup failed. Do not continue.")
+  }
+  
+  if (backup_df$OriginalMD5 != backup_df$BackupMD5) {
+    stop("Combined file backup MD5 mismatch. Do not continue.")
+  }
+  
+  cat("\nExisting combined file backed up successfully.\n")
+  
+} else {
+  
+  cat("No existing combined file found. A new one will be created.\n")
+}
+
+```
+
+## Rebuild combined Tukey object safely
+
+```{r}
+
+# Find Tukey spectra files, but only inside proper Event_### folders.
+# This avoids accidentally including backup files.
+all_candidate_tukey_files <- list.files(
+  path = tukeySpectraBaseDir,
+  pattern = "_Tukey_Spectra\\.rds$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+tukey_files <- all_candidate_tukey_files[
+  grepl("[/\\\\]Event_\\d{3}[/\\\\].*_Tukey_Spectra\\.rds$", all_candidate_tukey_files)
+]
+
+# Explicitly exclude any backup folders just in case
+tukey_files <- tukey_files[
+  !grepl("BACKUP|backup|Backup", tukey_files)
+]
+
+# Exclude combined output file if somehow matched
+tukey_files <- tukey_files[
+  basename(tukey_files) != "Combined_Tukey_Spectra.rds"
+]
+
+cat("Total candidate Tukey files found:", length(all_candidate_tukey_files), "\n")
+cat("Valid Event_### Tukey files used:", length(tukey_files), "\n\n")
+
+if (length(tukey_files) == 0) {
+  stop("No valid Tukey spectra files were found.")
+}
+
+parse_event_id <- function(filepath) {
+  
+  file_name <- basename(filepath)
+  
+  match_obj <- regexec("^(.*_Event_\\d+)_Tukey_Spectra\\.rds$", file_name)
+  match_parts <- regmatches(file_name, match_obj)[[1]]
+  
+  if (length(match_parts) == 0) {
+    stop("Could not parse EventID from filename: ", filepath)
+  }
+  
+  match_parts[2]
+}
+
+tukey_list <- lapply(tukey_files, function(f) {
+  
+  event_id <- parse_event_id(f)
+  obj <- readRDS(f)
+  
+  if (!is.list(obj)) {
+    stop(
+      "This Tukey spectra file is not a list: ", f,
+      "\nClass found: ", paste(class(obj), collapse = ", ")
+    )
+  }
+  
+  obj$EventID <- event_id
+  obj$SourceFile <- f
+  
+  obj
+})
+
+names(tukey_list) <- vapply(tukey_list, function(x) x$EventID, character(1))
+
+Combined_Tukey_Spectra_NEW <- tukey_list
+
+cat("Combined_Tukey_Spectra_NEW object created.\n")
+cat("Number of events:", length(Combined_Tukey_Spectra_NEW), "\n")
+
+```
+
+## Run stronger sanity checks before saving
+
+```{r}
+
+combined_summary_new <- dplyr::bind_rows(
+  lapply(Combined_Tukey_Spectra_NEW, function(x) {
+    data.frame(
+      EventID = x$EventID,
+      DriftID = sub("_Event_.*$", "", x$EventID),
+      NumUID = length(x$UID),
+      NumUniqueUID = length(unique(x$UID)),
+      Length_freq = length(x$freq),
+      Length_avgSpec = length(x$avgSpec),
+      Dim_allSpec_rows = if (is.null(dim(x$allSpec))) NA_integer_ else dim(x$allSpec)[1],
+      Dim_allSpec_cols = if (is.null(dim(x$allSpec))) NA_integer_ else dim(x$allSpec)[2],
+      Length_avgNoise = length(x$avgNoise),
+      Dim_allNoise_rows = if (is.null(dim(x$allNoise))) NA_integer_ else dim(x$allNoise)[1],
+      Dim_allNoise_cols = if (is.null(dim(x$allNoise))) NA_integer_ else dim(x$allNoise)[2],
+      Length_snrKeep = length(x$snrKeep),
+      SourceFile = x$SourceFile,
+      FileMD5 = as.character(tools::md5sum(x$SourceFile)),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+print(combined_summary_new, n = Inf)
+
+cat("\nTotal clicks in rebuilt combined object:\n")
+print(sum(combined_summary_new$NumUID))
+
+cat("\nADRIFT_003 rebuilt summary:\n")
+print(
+  combined_summary_new %>%
+    filter(DriftID == "ADRIFT_003")
+)
+
+# -----------------------------
+# Within-object consistency checks
+# -----------------------------
+
+bad_event_id_duplicates <- combined_summary_new %>%
+  count(EventID) %>%
+  filter(n > 1)
+
+bad_uid_counts <- combined_summary_new %>%
+  filter(NumUID != NumUniqueUID)
+
+bad_allSpec <- combined_summary_new %>%
+  filter(Dim_allSpec_cols != NumUID)
+
+bad_allNoise <- combined_summary_new %>%
+  filter(Dim_allNoise_cols != NumUID)
+
+bad_snrKeep <- combined_summary_new %>%
+  filter(Length_snrKeep != NumUID)
+
+bad_avgSpec <- combined_summary_new %>%
+  filter(Length_avgSpec != Length_freq)
+
+bad_avgNoise <- combined_summary_new %>%
+  filter(Length_avgNoise != Length_freq)
+
+cat("\nDuplicate EventIDs:\n")
+print(bad_event_id_duplicates)
+
+cat("\nEvents with duplicated UIDs within the event:\n")
+print(bad_uid_counts)
+
+cat("\nEvents with allSpec column mismatch:\n")
+print(bad_allSpec)
+
+cat("\nEvents with allNoise column mismatch:\n")
+print(bad_allNoise)
+
+cat("\nEvents with snrKeep mismatch:\n")
+print(bad_snrKeep)
+
+cat("\nEvents with avgSpec/freq mismatch:\n")
+print(bad_avgSpec)
+
+cat("\nEvents with avgNoise/freq mismatch:\n")
+print(bad_avgNoise)
+
+# -----------------------------
+# Cross-event duplicate UID check within each DriftID
+# -----------------------------
+
+combined_click_keys_new <- dplyr::bind_rows(
+  lapply(Combined_Tukey_Spectra_NEW, function(x) {
+    data.frame(
+      EventID = x$EventID,
+      DriftID = sub("_Event_.*$", "", x$EventID),
+      UID = as.character(x$UID),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+duplicate_drift_uid_new <- combined_click_keys_new %>%
+  count(DriftID, UID, name = "n_rows") %>%
+  filter(n_rows > 1) %>%
+  arrange(DriftID, UID)
+
+cat("\nDuplicate DriftID + UID combinations across rebuilt combined object:\n")
+print(duplicate_drift_uid_new)
+
+cat("\nNumber of duplicate DriftID + UID combinations:\n")
+print(nrow(duplicate_drift_uid_new))
+
+# -----------------------------
+# Stop if anything serious is wrong
+# -----------------------------
+
+if (nrow(bad_event_id_duplicates) > 0) {
+  stop("Duplicate EventIDs found. Do not save.")
+}
+
+if (nrow(bad_uid_counts) > 0) {
+  stop("Duplicated UIDs within at least one event. Do not save.")
+}
+
+if (nrow(bad_allSpec) > 0) {
+  stop("allSpec column mismatch found. Do not save.")
+}
+
+if (nrow(bad_allNoise) > 0) {
+  stop("allNoise column mismatch found. Do not save.")
+}
+
+if (nrow(bad_snrKeep) > 0) {
+  stop("snrKeep length mismatch found. Do not save.")
+}
+
+if (nrow(bad_avgSpec) > 0) {
+  stop("avgSpec/freq mismatch found. Do not save.")
+}
+
+if (nrow(bad_avgNoise) > 0) {
+  stop("avgNoise/freq mismatch found. Do not save.")
+}
+
+if (nrow(duplicate_drift_uid_new) > 0) {
+  stop("Duplicate DriftID + UID combinations found. Do not save.")
+}
+
+cat("\nAll pre-save sanity checks passed.\n")
+
+```
+
+## Save the rebuilt combined file
+
+```{r}
+
+saveRDS(
+  Combined_Tukey_Spectra_NEW,
+  combined_output_file
+)
+
+cat("Corrected Combined_Tukey_Spectra saved to:\n")
+cat(combined_output_file, "\n")
+
+cat("\nSaved file MD5:\n")
+print(tools::md5sum(combined_output_file))
+
+```
+
+## Final Sanity Checks
+
+```{r}
+
+summarize_combined <- function(x, label) {
+  dplyr::bind_rows(lapply(x, function(e) {
+    data.frame(
+      Version = label,
+      EventID = e$EventID,
+      DriftID = sub("_Event_.*$", "", e$EventID),
+      NumUID = length(e$UID),
+      NumUniqueUID = length(unique(e$UID)),
+      allSpec_cols = ncol(e$allSpec),
+      allNoise_cols = ncol(e$allNoise),
+      snrKeep_len = length(e$snrKeep),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+old_sum <- summarize_combined(combined_tukey, "OLD")
+new_sum <- summarize_combined(Combined_Tukey_Spectra_NEW, "NEW")
+
+check_df <- old_sum %>%
+  select(
+    EventID, DriftID,
+    Old_NumUID = NumUID,
+    Old_NumUniqueUID = NumUniqueUID,
+    Old_allSpec_cols = allSpec_cols,
+    Old_allNoise_cols = allNoise_cols,
+    Old_snrKeep_len = snrKeep_len
+  ) %>%
+  full_join(
+    new_sum %>%
+      select(
+        EventID, DriftID,
+        New_NumUID = NumUID,
+        New_NumUniqueUID = NumUniqueUID,
+        New_allSpec_cols = allSpec_cols,
+        New_allNoise_cols = allNoise_cols,
+        New_snrKeep_len = snrKeep_len
+      ),
+    by = c("EventID", "DriftID")
+  ) %>%
+  mutate(
+    Delta_NumUID = New_NumUID - Old_NumUID,
+    Delta_allSpec_cols = New_allSpec_cols - Old_allSpec_cols,
+    Delta_allNoise_cols = New_allNoise_cols - Old_allNoise_cols,
+    Delta_snrKeep_len = New_snrKeep_len - Old_snrKeep_len
+  ) %>%
+  arrange(DriftID, EventID)
+
+changed_events <- check_df %>%
+  filter(
+    Delta_NumUID != 0 |
+      Delta_allSpec_cols != 0 |
+      Delta_allNoise_cols != 0 |
+      Delta_snrKeep_len != 0 |
+      is.na(Delta_NumUID)
+  )
+
+old_total <- sum(old_sum$NumUID)
+new_total <- sum(new_sum$NumUID)
+
+cat("OLD total clicks:", old_total, "\n")
+cat("NEW total clicks:", new_total, "\n")
+cat("Difference:", new_total - old_total, "\n\n")
+
+cat("Changed events:\n")
+print(changed_events, n = Inf)
+
+# Expected: only ADRIFT_003_Event_001 changed from 13,599 to 3,203
+expected_event <- "ADRIFT_003_Event_001"
+
+if (nrow(changed_events) != 1 ||
+    changed_events$EventID != expected_event ||
+    changed_events$Old_NumUID != 13599 ||
+    changed_events$New_NumUID != 3203 ||
+    changed_events$Delta_NumUID != -10396 ||
+    changed_events$Delta_allSpec_cols != -10396 ||
+    changed_events$Delta_allNoise_cols != -10396 ||
+    changed_events$Delta_snrKeep_len != -10396) {
+  stop("FAIL: Unexpected change detected. Inspect changed_events.")
+}
+
+# Check internal consistency of new combined object
+new_internal_problems <- new_sum %>%
+  filter(
+    NumUID != NumUniqueUID |
+      NumUID != allSpec_cols |
+      NumUID != allNoise_cols |
+      NumUID != snrKeep_len
+  )
+
+if (nrow(new_internal_problems) > 0) {
+  print(new_internal_problems, n = Inf)
+  stop("FAIL: Internal UID/allSpec/allNoise/snrKeep mismatch in NEW combined object.")
+}
+
+if (new_total != old_total - 10396) {
+  stop("FAIL: New total does not equal old total minus 10,396.")
+}
+
+cat("\nPASS: Only ADRIFT_003_Event_001 changed, from 13,599 to 3,203 clicks.\n")
+cat("PASS: All NEW event UID/allSpec/allNoise/snrKeep counts line up.\n")
+
+```
 
 
 

@@ -1,0 +1,1722 @@
+---
+title: "ICI_MinMax_kmeans_Clustering"
+author: "Sarah Moseley"
+date: "2026-05-05"
+output: html_document
+---
+
+## Setup
+
+```{r setup}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+required_packages <- c(
+  "dplyr",
+  "ggplot2",
+  "tidyr",
+  "stringr",
+  "readr",
+  "DBI",
+  "RSQLite"
+)
+
+missing_packages <- required_packages[
+  !sapply(required_packages, requireNamespace, quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing required packages: ",
+    paste(missing_packages, collapse = ", "),
+    "\nInstall them before running this workflow."
+  )
+}
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(readr)
+library(DBI)
+library(RSQLite)
+
+```
+
+## Use settings
+
+```{r user-settings}
+
+# This should point to the FIXED combined Tukey object,
+# where ADRIFT_003_Event_001 has already been corrected.
+combined_file <- file.choose()
+
+# SQLite databases containing PAMGuard click timing information
+sqlite_dir <- "E:/Analysis/Useable Databases"
+
+# Output folder for ICI-specific products
+ici_output_dir <- "E:/Analysis/ICI_Output"
+
+dir.create(ici_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Expected total clicks after fixing ADRIFT_003_Event_001
+expected_total_clicks_new <- 344153
+
+# Used later only for flagging suspicious intervals.
+# Do not delete based on this yet.
+max_reasonable_ici_ms <- 1000
+
+```
+
+## Load Fixed Combined Tukey
+
+```{r load-fixed-combined-tukey}
+
+combined_tukey <- readRDS(combined_file)
+
+cat("Loaded combined_tukey object.\n")
+cat("Number of events:", length(combined_tukey), "\n")
+
+cat("\nClass of combined_tukey:\n")
+print(class(combined_tukey))
+
+cat("\nClass of first event object:\n")
+print(class(combined_tukey[[1]]))
+
+cat("\nNames in first event object:\n")
+print(names(combined_tukey[[1]]))
+
+```
+
+## Santiy Check: Combined Structure
+
+```{r sanity-check-combined-structure}
+
+event_structure_summary <- data.frame(
+  EventIndex = seq_along(combined_tukey),
+  EventID = sapply(combined_tukey, function(x) x$EventID),
+  n_freq = sapply(combined_tukey, function(x) length(x$freq)),
+  n_uid = sapply(combined_tukey, function(x) length(x$UID)),
+  allSpec_rows = sapply(combined_tukey, function(x) dim(x$allSpec)[1]),
+  allSpec_cols = sapply(combined_tukey, function(x) dim(x$allSpec)[2]),
+  allNoise_rows = sapply(combined_tukey, function(x) dim(x$allNoise)[1]),
+  allNoise_cols = sapply(combined_tukey, function(x) dim(x$allNoise)[2]),
+  snrKeep_length = sapply(combined_tukey, function(x) length(x$snrKeep)),
+  sourcefile_length = sapply(combined_tukey, function(x) length(x$SourceFile)),
+  stringsAsFactors = FALSE
+)
+
+print(event_structure_summary)
+
+total_clicks_new <- sum(event_structure_summary$allSpec_cols)
+
+cat("\nTotal clicks in fixed combined_tukey:", total_clicks_new, "\n")
+cat("Expected total clicks:", expected_total_clicks_new, "\n")
+
+if (total_clicks_new == expected_total_clicks_new) {
+  cat("\nPASS: Total click count matches expected fixed total.\n")
+} else {
+  cat("\nFAIL: Total click count does not match expected fixed total.\n")
+}
+
+uid_matches_allSpec <- all(event_structure_summary$n_uid == event_structure_summary$allSpec_cols)
+allNoise_matches_allSpec <- all(event_structure_summary$allNoise_cols == event_structure_summary$allSpec_cols)
+snrKeep_matches_allSpec <- all(event_structure_summary$snrKeep_length == event_structure_summary$allSpec_cols)
+
+cat("\nUID count matches allSpec columns:", uid_matches_allSpec, "\n")
+cat("allNoise columns match allSpec columns:", allNoise_matches_allSpec, "\n")
+cat("snrKeep length matches allSpec columns:", snrKeep_matches_allSpec, "\n")
+
+if (uid_matches_allSpec && allNoise_matches_allSpec && snrKeep_matches_allSpec) {
+  cat("\nPASS: Core click-level dimensions line up across all events.\n")
+} else {
+  cat("\nFAIL: At least one event has mismatched click-level dimensions.\n")
+}
+
+```
+
+## Duplicate Events Sanity Check
+
+```{r sanity-check-duplicate-events-and-uids}
+
+# ------------------------------------------------------------
+# Build temporary click-level metadata for duplicate checks
+# ------------------------------------------------------------
+
+click_metadata_from_tukey <- list()
+
+for (i in seq_along(combined_tukey)) {
+  
+  event_obj <- combined_tukey[[i]]
+  n_clicks <- ncol(event_obj$allSpec)
+  
+  click_metadata_from_tukey[[i]] <- data.frame(
+    EventIndex = i,
+    EventID = event_obj$EventID,
+    ClickIndexWithinEvent = seq_len(n_clicks),
+    UID = as.character(event_obj$UID),
+    SourceFile = event_obj$SourceFile,
+    stringsAsFactors = FALSE
+  )
+}
+
+click_metadata_from_tukey <- bind_rows(click_metadata_from_tukey) %>%
+  mutate(
+    DriftID = sub("_Event_.*$", "", EventID)
+  )
+
+cat("Total click metadata rows:", nrow(click_metadata_from_tukey), "\n")
+cat("Expected total clicks:", expected_total_clicks_new, "\n\n")
+
+# ------------------------------------------------------------
+# 1. Check duplicated EventIDs
+# ------------------------------------------------------------
+
+duplicate_event_ids <- click_metadata_from_tukey %>%
+  distinct(EventIndex, EventID) %>%
+  count(EventID, name = "n_event_indices") %>%
+  filter(n_event_indices > 1)
+
+cat("Duplicated EventIDs:\n")
+print(duplicate_event_ids)
+
+if (nrow(duplicate_event_ids) == 0) {
+  cat("\nPASS: No duplicated EventIDs.\n")
+} else {
+  cat("\nFAIL: Some EventIDs appear more than once.\n")
+}
+
+# ------------------------------------------------------------
+# 2. Check duplicated UID within the same EventID
+# ------------------------------------------------------------
+
+duplicate_uid_within_event <- click_metadata_from_tukey %>%
+  count(EventID, UID, name = "n_rows") %>%
+  filter(n_rows > 1) %>%
+  arrange(EventID, UID)
+
+cat("\nDuplicated UID values within the same EventID:\n")
+print(duplicate_uid_within_event)
+
+if (nrow(duplicate_uid_within_event) == 0) {
+  cat("\nPASS: No duplicated UIDs within any EventID.\n")
+} else {
+  cat("\nFAIL: Some UIDs are duplicated within the same EventID.\n")
+}
+
+# ------------------------------------------------------------
+# 3. Check duplicated UID across events within the same DriftID
+# ------------------------------------------------------------
+
+duplicate_uid_across_events_same_drift <- click_metadata_from_tukey %>%
+  group_by(DriftID, UID) %>%
+  summarise(
+    n_rows = n(),
+    n_event_ids = n_distinct(EventID),
+    EventIDs = paste(sort(unique(EventID)), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  filter(n_rows > 1 | n_event_ids > 1) %>%
+  arrange(DriftID, UID)
+
+cat("\nDuplicated DriftID + UID combinations across Tukey metadata:\n")
+print(duplicate_uid_across_events_same_drift)
+
+if (nrow(duplicate_uid_across_events_same_drift) == 0) {
+  cat("\nPASS: No duplicated DriftID + UID combinations across events.\n")
+} else {
+  cat("\nFAIL: Some DriftID + UID combinations appear more than once.\n")
+}
+
+# ------------------------------------------------------------
+# 4. Save duplicate diagnostics
+# ------------------------------------------------------------
+
+write.csv(
+  duplicate_event_ids,
+  file = file.path(ici_output_dir, "duplicate_event_ids_NEW.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  duplicate_uid_within_event,
+  file = file.path(ici_output_dir, "duplicate_uid_within_event_NEW.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  duplicate_uid_across_events_same_drift,
+  file = file.path(ici_output_dir, "duplicate_uid_across_events_same_drift_NEW.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Save Clean Click-Level Tukey Metadata
+
+```{r save-clean-click-metadata}
+
+cat("Clean Tukey click metadata summary:\n\n")
+
+cat("Rows:", nrow(click_metadata_from_tukey), "\n")
+cat("Unique EventIDs:", n_distinct(click_metadata_from_tukey$EventID), "\n")
+cat("Unique DriftIDs:", n_distinct(click_metadata_from_tukey$DriftID), "\n")
+cat("Unique DriftID + UID pairs:",
+    nrow(distinct(click_metadata_from_tukey, DriftID, UID)), "\n")
+
+cat("\nClicks by DriftID:\n")
+
+clicks_by_drift <- click_metadata_from_tukey %>%
+  count(DriftID, name = "n_tukey_clicks") %>%
+  arrange(DriftID)
+
+print(clicks_by_drift)
+
+cat("\nClicks by EventID:\n")
+
+clicks_by_event <- click_metadata_from_tukey %>%
+  count(DriftID, EventID, name = "n_tukey_clicks") %>%
+  arrange(DriftID, EventID)
+
+print(clicks_by_event)
+
+# Save clean metadata
+saveRDS(
+  click_metadata_from_tukey,
+  file = file.path(ici_output_dir, "click_metadata_from_tukey_NEW.rds")
+)
+
+write.csv(
+  click_metadata_from_tukey,
+  file = file.path(ici_output_dir, "click_metadata_from_tukey_NEW.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  clicks_by_drift,
+  file = file.path(ici_output_dir, "clicks_by_drift_NEW.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  clicks_by_event,
+  file = file.path(ici_output_dir, "clicks_by_event_NEW.csv"),
+  row.names = FALSE
+)
+
+cat("\nSaved clean Tukey metadata outputs to:\n")
+cat(ici_output_dir, "\n")
+
+```
+
+## Define UTC parser and extract click timing from SQLite databases
+
+```{r define-utc-parser}
+
+# ------------------------------------------------------------
+# Function to clean and parse PAMGuard UTC strings
+# ------------------------------------------------------------
+
+clean_pamguard_utc <- function(x) {
+  
+  x <- as.character(x)
+  
+  # Some UTC strings contain ".character(0)" before milliseconds.
+  # Example:
+  # "2021-07-30 12:28:29.character(0)187"
+  # should become:
+  # "2021-07-30 12:28:29.187"
+  x_clean <- gsub("character\\(0\\)", "", x)
+  
+  # If no decimal milliseconds are present, add .000
+  has_decimal <- grepl("\\.\\d+$", x_clean)
+  x_clean[!has_decimal & !is.na(x_clean)] <- paste0(x_clean[!has_decimal & !is.na(x_clean)], ".000")
+  
+  parsed_time <- as.POSIXct(
+    x_clean,
+    format = "%Y-%m-%d %H:%M:%OS",
+    tz = "UTC"
+  )
+  
+  return(parsed_time)
+}
+
+# ------------------------------------------------------------
+# Function to extract timing rows for one drift
+# ------------------------------------------------------------
+
+extract_timing_for_drift <- function(drift_id, uid_vec, sqlite_dir) {
+  
+  db_file <- file.path(sqlite_dir, paste0(drift_id, " - Clean.sqlite3"))
+  
+  if (!file.exists(db_file)) {
+    warning("Missing SQLite database for ", drift_id, ": ", db_file)
+    return(NULL)
+  }
+  
+  uid_vec <- unique(suppressWarnings(as.numeric(uid_vec)))
+  uid_vec <- uid_vec[!is.na(uid_vec)]
+  
+  if (length(uid_vec) == 0) {
+    warning("No numeric UIDs available for ", drift_id)
+    return(NULL)
+  }
+  
+  cat("\n============================\n")
+  cat("Extracting timing for:", drift_id, "\n")
+  cat("Database:", db_file, "\n")
+  cat("Number of unique Tukey UIDs:", length(uid_vec), "\n")
+  cat("============================\n")
+  
+  con <- dbConnect(RSQLite::SQLite(), db_file)
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  # Query in chunks to avoid huge SQL statements
+  chunk_size <- 1000
+  uid_chunks <- split(uid_vec, ceiling(seq_along(uid_vec) / chunk_size))
+  
+  timing_chunks <- vector("list", length(uid_chunks))
+  
+  for (j in seq_along(uid_chunks)) {
+    
+    uid_sql <- paste(uid_chunks[[j]], collapse = ",")
+    
+    query <- paste0(
+      "SELECT ",
+      "Id, UID, UTC, UTCMilliseconds, EventId, ClickNo, parentID, parentUID, BinaryFile, Channels ",
+      "FROM Click_Detector_OfflineClicks ",
+      "WHERE UID IN (", uid_sql, ")"
+    )
+    
+    timing_chunks[[j]] <- dbGetQuery(con, query)
+  }
+  
+  timing_df <- bind_rows(timing_chunks)
+  
+  if (nrow(timing_df) == 0) {
+    warning("No matching timing rows found for ", drift_id)
+    return(NULL)
+  }
+  
+  timing_df <- timing_df %>%
+    mutate(
+      DriftID = drift_id,
+      UID = as.character(UID),
+      UTC_clean = gsub("character\\(0\\)", "", as.character(UTC)),
+      UTC_parsed = clean_pamguard_utc(UTC)
+    )
+  
+  cat("Rows extracted:", nrow(timing_df), "\n")
+  cat("Rows with missing parsed UTC:", sum(is.na(timing_df$UTC_parsed)), "\n")
+  
+  return(timing_df)
+}
+
+```
+
+## Extract timing
+
+```{r extract-timing-from-all-sqlite-databases}
+
+if (!dir.exists(sqlite_dir)) {
+  stop("SQLite directory does not exist: ", sqlite_dir)
+}
+
+uids_by_drift <- split(
+  click_metadata_from_tukey$UID,
+  click_metadata_from_tukey$DriftID
+)
+
+cat("Number of DriftIDs to extract:", length(uids_by_drift), "\n")
+cat("\nDriftIDs:\n")
+print(names(uids_by_drift))
+
+all_timing_list <- list()
+
+ for (drift_id in names(uids_by_drift)) {
+  
+  all_timing_list[[drift_id]] <- extract_timing_for_drift(
+    drift_id = drift_id,
+    uid_vec = uids_by_drift[[drift_id]],
+    sqlite_dir = sqlite_dir
+  )
+}
+
+click_timing_from_sqlite <- bind_rows(all_timing_list)
+
+cat("\n============================\n")
+cat("Timing extraction complete\n")
+cat("============================\n")
+
+cat("Total timing rows extracted:", nrow(click_timing_from_sqlite), "\n")
+cat("Unique DriftIDs extracted:", n_distinct(click_timing_from_sqlite$DriftID), "\n")
+cat("Rows with missing parsed UTC:", sum(is.na(click_timing_from_sqlite$UTC_parsed)), "\n")
+
+timing_by_drift <- click_timing_from_sqlite %>%
+  count(DriftID, name = "n_timing_rows") %>%
+  arrange(DriftID)
+
+print(timing_by_drift)
+
+# Save raw extracted timing table
+saveRDS(
+  click_timing_from_sqlite,
+  file = file.path(ici_output_dir, "click_timing_from_sqlite_NEW.rds")
+)
+
+write.csv(
+  timing_by_drift,
+  file = file.path(ici_output_dir, "timing_rows_by_drift_NEW.csv"),
+  row.names = FALSE
+)
+
+cat("\nSaved timing extraction outputs to:\n")
+cat(ici_output_dir, "\n")
+
+```
+
+## Diagnose timing uniqueness and join timing to Tukey metadata
+
+```{r diagnose-timing-uniqueness-before-join}
+
+cat("Rows in Tukey click metadata:", nrow(click_metadata_from_tukey), "\n")
+cat("Rows in extracted SQLite timing:", nrow(click_timing_from_sqlite), "\n\n")
+
+duplicate_timing_rows <- click_timing_from_sqlite %>%
+  count(DriftID, UID, name = "n_sql_rows") %>%
+  filter(n_sql_rows > 1) %>%
+  arrange(DriftID, UID)
+
+cat("Duplicated DriftID + UID rows in SQLite timing table:\n")
+print(duplicate_timing_rows)
+
+if (nrow(duplicate_timing_rows) == 0) {
+  cat("\nPASS: SQLite timing has one row per DriftID + UID.\n")
+} else {
+  cat("\nFAIL: SQLite timing has duplicated DriftID + UID rows.\n")
+  cat("Do not join yet. Need to inspect duplicates first.\n")
+}
+
+write.csv(
+  duplicate_timing_rows,
+  file = file.path(ici_output_dir, "duplicate_timing_rows_sqlite_NEW.csv"),
+  row.names = FALSE
+)
+
+```
+
+##  Join clean Tukey metadata to SQLite timing
+
+```{r join-tukey-metadata-to-sqlite-timing}
+
+if (nrow(duplicate_timing_rows) > 0) {
+  stop("Stopping because SQLite timing contains duplicated DriftID + UID rows.")
+}
+
+click_metadata_with_time <- click_metadata_from_tukey %>%
+  left_join(
+    click_timing_from_sqlite %>%
+      select(
+        DriftID,
+        UID,
+        SQL_Id = Id,
+        UTC,
+        UTC_clean,
+        UTC_parsed,
+        UTCMilliseconds,
+        SQL_EventId = EventId,
+        SQL_ClickNo = ClickNo,
+        parentID,
+        parentUID,
+        BinaryFile,
+        Channels
+      ),
+    by = c("DriftID", "UID")
+  )
+
+cat("Rows before join:", nrow(click_metadata_from_tukey), "\n")
+cat("Rows after join:", nrow(click_metadata_with_time), "\n")
+
+if (nrow(click_metadata_with_time) == nrow(click_metadata_from_tukey)) {
+  cat("\nPASS: Join did not change row count.\n")
+} else {
+  cat("\nFAIL: Join changed row count.\n")
+}
+
+cat("\nRows missing UTC_parsed:", sum(is.na(click_metadata_with_time$UTC_parsed)), "\n")
+cat("Rows with UTC_parsed:", sum(!is.na(click_metadata_with_time$UTC_parsed)), "\n")
+
+join_coverage_by_drift <- click_metadata_with_time %>%
+  group_by(DriftID) %>%
+  summarise(
+    n_tukey_clicks = n(),
+    n_with_time = sum(!is.na(UTC_parsed)),
+    n_missing_time = sum(is.na(UTC_parsed)),
+    percent_with_time = 100 * n_with_time / n_tukey_clicks,
+    .groups = "drop"
+  ) %>%
+  arrange(DriftID)
+
+cat("\nJoin coverage by DriftID:\n")
+print(join_coverage_by_drift)
+
+join_coverage_by_event <- click_metadata_with_time %>%
+  group_by(DriftID, EventID) %>%
+  summarise(
+    n_tukey_clicks = n(),
+    n_with_time = sum(!is.na(UTC_parsed)),
+    n_missing_time = sum(is.na(UTC_parsed)),
+    percent_with_time = 100 * n_with_time / n_tukey_clicks,
+    .groups = "drop"
+  ) %>%
+  arrange(DriftID, EventID)
+
+cat("\nJoin coverage by EventID:\n")
+print(join_coverage_by_event)
+
+# Save joined timing metadata
+saveRDS(
+  click_metadata_with_time,
+  file = file.path(ici_output_dir, "click_metadata_with_time_NEW.rds")
+)
+
+write.csv(
+  join_coverage_by_drift,
+  file = file.path(ici_output_dir, "join_coverage_by_drift_NEW.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  join_coverage_by_event,
+  file = file.path(ici_output_dir, "join_coverage_by_event_NEW.csv"),
+  row.names = FALSE
+)
+
+cat("\nSaved joined timing metadata outputs to:\n")
+cat(ici_output_dir, "\n")
+
+```
+
+## Check whether multiple clicks share the exact same timestamp within the same Tukey EventID
+
+```{r diagnose-timestamp-duplicates-before-ici}
+
+timestamp_duplicates_within_event <- click_metadata_with_time %>%
+  count(EventID, UTC_parsed, name = "n_clicks_same_timestamp") %>%
+  filter(n_clicks_same_timestamp > 1) %>%
+  arrange(EventID, UTC_parsed)
+
+cat("Number of EventID + timestamp combinations with multiple clicks:\n")
+print(nrow(timestamp_duplicates_within_event))
+
+cat("\nPreview of duplicated timestamps within events:\n")
+print(head(timestamp_duplicates_within_event, 30))
+
+write.csv(
+  timestamp_duplicates_within_event,
+  file = file.path(ici_output_dir, "timestamp_duplicates_within_event_NEW.csv"),
+  row.names = FALSE
+)
+
+if (nrow(timestamp_duplicates_within_event) == 0) {
+  cat("\nPASS: No duplicated timestamps within events.\n")
+} else {
+  cat("\nNOTE: Some clicks share exact timestamps within events.\n")
+  cat("This is not automatically wrong, but it may produce zero-ms ICI values.\n")
+}
+
+```
+
+## Summarize duplicated timestamps within events
+
+```{r}
+
+timestamp_duplicate_summary <- timestamp_duplicates_within_event %>%
+  summarise(
+    n_duplicate_timestamp_bins = n(),
+    n_clicks_in_duplicate_timestamp_bins = sum(n_clicks_same_timestamp),
+    n_extra_clicks_caused_by_timestamp_ties = sum(n_clicks_same_timestamp - 1),
+    max_clicks_same_timestamp = max(n_clicks_same_timestamp),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    total_clicks = nrow(click_metadata_with_time),
+    percent_clicks_in_duplicate_timestamp_bins =
+      100 * n_clicks_in_duplicate_timestamp_bins / total_clicks,
+    percent_extra_clicks_due_to_ties =
+      100 * n_extra_clicks_caused_by_timestamp_ties / total_clicks
+  )
+
+cat("Duplicated timestamp summary:\n")
+print(timestamp_duplicate_summary)
+
+timestamp_duplicates_by_event <- timestamp_duplicates_within_event %>%
+  group_by(EventID) %>%
+  summarise(
+    n_duplicate_timestamp_bins = n(),
+    n_clicks_in_duplicate_timestamp_bins = sum(n_clicks_same_timestamp),
+    n_extra_clicks_caused_by_timestamp_ties = sum(n_clicks_same_timestamp - 1),
+    max_clicks_same_timestamp = max(n_clicks_same_timestamp),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_extra_clicks_caused_by_timestamp_ties))
+
+cat("\nEvents with the most duplicated timestamps:\n")
+print(head(timestamp_duplicates_by_event, 20))
+
+write.csv(
+  timestamp_duplicate_summary,
+  file = file.path(ici_output_dir, "timestamp_duplicate_summary_NEW.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  timestamp_duplicates_by_event,
+  file = file.path(ici_output_dir, "timestamp_duplicates_by_event_NEW.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Check UTC Clean VS Parsed Duplicates
+
+```{r check-utc-clean-vs-parsed-duplicates}
+
+# Show milliseconds when printing POSIXct
+options(digits.secs = 6)
+
+# Compare duplicate counts using UTC_clean string vs UTC_parsed time object
+
+duplicates_by_utc_clean <- click_metadata_with_time %>%
+  count(EventID, UTC_clean, name = "n_clicks_same_utc_clean") %>%
+  filter(n_clicks_same_utc_clean > 1)
+
+duplicates_by_utc_parsed <- click_metadata_with_time %>%
+  count(EventID, UTC_parsed, name = "n_clicks_same_utc_parsed") %>%
+  filter(n_clicks_same_utc_parsed > 1)
+
+cat("Duplicate EventID + UTC_clean combinations:\n")
+print(nrow(duplicates_by_utc_clean))
+
+cat("\nDuplicate EventID + UTC_parsed combinations:\n")
+print(nrow(duplicates_by_utc_parsed))
+
+cat("\nPreview UTC_clean duplicates:\n")
+print(head(duplicates_by_utc_clean, 20))
+
+cat("\nPreview UTC_parsed duplicates:\n")
+print(head(duplicates_by_utc_parsed, 20))
+
+```
+
+## Robust UTC string cleaner for malformed PAMGuard UTC values
+
+```{r}
+
+clean_pamguard_utc_string <- function(x) {
+  
+  x <- as.character(x)
+  
+  out <- vapply(x, function(s) {
+    
+    if (is.na(s) || s == "") {
+      return(NA_character_)
+    }
+    
+    # Remove known malformed character(0) insertion
+    s <- gsub("character\\(0\\)", "", s)
+    
+    # Extract base date-time through whole seconds
+    base_match <- regmatches(
+      s,
+      regexpr("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}", s)
+    )
+    
+    if (length(base_match) == 0 || base_match == "") {
+      return(NA_character_)
+    }
+    
+    base_time <- base_match[1]
+    
+    # Everything after the base timestamp
+    remainder <- sub(
+      "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}",
+      "",
+      s
+    )
+    
+    # Default to .000 if no fractional part exists
+    frac_digits <- "000"
+    
+    if (grepl("^\\.", remainder)) {
+      
+      frac_raw <- sub("^\\.", "", remainder)
+      
+      # Case: c("0", "0")0 style malformed fraction
+      if (grepl("^c\\(", frac_raw)) {
+        
+        quoted_digits <- regmatches(
+          frac_raw,
+          gregexpr('"\\d"', frac_raw)
+        )[[1]]
+        
+        quoted_digits <- gsub('"', "", quoted_digits)
+        
+        after_c <- sub("^c\\([^)]*\\)", "", frac_raw)
+        
+        trailing_digits <- regmatches(
+          after_c,
+          gregexpr("\\d", after_c)
+        )[[1]]
+        
+        if (length(trailing_digits) == 1 && trailing_digits[1] == -1) {
+          trailing_digits <- character(0)
+        }
+        
+        frac_digits <- paste0(c(quoted_digits, trailing_digits), collapse = "")
+        
+      } else {
+        
+        # Normal case: .127
+        frac_digits <- sub("^([0-9]+).*$", "\\1", frac_raw)
+        
+        if (!grepl("^\\d+$", frac_digits)) {
+          frac_digits <- "000"
+        }
+      }
+    }
+    
+    # Force milliseconds: exactly 3 digits
+    frac_digits <- substr(paste0(frac_digits, "000"), 1, 3)
+    
+    paste0(base_time, ".", frac_digits)
+    
+  }, character(1))
+  
+  return(out)
+}
+
+parse_clean_utc_to_ms <- function(x_clean) {
+  
+  base_time <- as.POSIXct(
+    sub("\\.\\d+$", "", x_clean),
+    format = "%Y-%m-%d %H:%M:%S",
+    tz = "UTC"
+  )
+  
+  milliseconds <- as.numeric(sub("^.*\\.", "", x_clean))
+  
+  as.numeric(base_time) * 1000 + milliseconds
+}
+
+click_metadata_with_time <- click_metadata_with_time %>%
+  mutate(
+    UTC_clean_fixed = clean_pamguard_utc_string(UTC),
+    UTC_ms_fixed = parse_clean_utc_to_ms(UTC_clean_fixed)
+  )
+
+cat("Rows:", nrow(click_metadata_with_time), "\n")
+cat("Missing UTC_clean_fixed:", sum(is.na(click_metadata_with_time$UTC_clean_fixed)), "\n")
+cat("Missing UTC_ms_fixed:", sum(is.na(click_metadata_with_time$UTC_ms_fixed)), "\n")
+
+cat("\nExamples of malformed c(...) UTC values after cleaning:\n")
+
+click_metadata_with_time %>%
+  filter(grepl("c\\(", UTC)) %>%
+  select(UID, UTC, UTC_clean_fixed, UTC_ms_fixed) %>%
+  head(20) %>%
+  print()
+
+
+```
+
+## Inspect malformed rows
+
+```{r}
+
+c_malformed_rows <- click_metadata_with_time %>%
+  filter(grepl("c\\(", UTC)) %>%
+  select(
+    EventID,
+    ClickIndexWithinEvent,
+    UID,
+    UTC,
+    UTC_clean,
+    UTC_parsed,
+    UTCMilliseconds,
+    UTC_clean_fixed,
+    UTC_ms_fixed
+  )
+
+cat("Number of c(...) malformed UTC rows:", nrow(c_malformed_rows), "\n\n")
+
+print(head(c_malformed_rows, 30))
+
+```
+
+##  Validate that c(...) malformed UTC rows were cleaned correctly
+
+```{r}
+
+c_malformed_check <- click_metadata_with_time %>%
+  filter(grepl("c\\(", UTC)) %>%
+  mutate(
+    fixed_has_normal_timestamp_format = grepl(
+      "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}$",
+      UTC_clean_fixed
+    )
+  )
+
+cat("Number of c(...) malformed UTC rows:", nrow(c_malformed_check), "\n")
+cat("Rows with missing UTC_clean_fixed:", sum(is.na(c_malformed_check$UTC_clean_fixed)), "\n")
+cat("Rows with missing UTC_ms_fixed:", sum(is.na(c_malformed_check$UTC_ms_fixed)), "\n")
+cat("Rows with valid fixed timestamp format:", sum(c_malformed_check$fixed_has_normal_timestamp_format), "\n")
+cat("Rows with invalid fixed timestamp format:", sum(!c_malformed_check$fixed_has_normal_timestamp_format), "\n\n")
+
+cat("Preview of fixed c(...) rows:\n")
+
+c_malformed_check %>%
+  select(
+    EventID,
+    ClickIndexWithinEvent,
+    UID,
+    UTC,
+    UTC_clean,
+    UTC_parsed,
+    UTCMilliseconds,
+    UTC_clean_fixed,
+    UTC_ms_fixed,
+    fixed_has_normal_timestamp_format
+  ) %>%
+  head(30) %>%
+  print()
+
+```
+
+## Create final timing fields for ICI workflow
+
+```{r}
+
+# These are the columns we will use from here forward.
+#
+# Final_UTC_clean = corrected readable timestamp string
+# Final_UTC_ms    = corrected numeric absolute timestamp in milliseconds
+# ------------------------------------------------------------
+
+click_metadata_with_time <- click_metadata_with_time %>%
+  mutate(
+    Final_UTC_clean = UTC_clean_fixed,
+    Final_UTC_ms = UTC_ms_fixed
+  )
+
+cat("Rows:", nrow(click_metadata_with_time), "\n")
+cat("Missing Final_UTC_clean:", sum(is.na(click_metadata_with_time$Final_UTC_clean)), "\n")
+cat("Missing Final_UTC_ms:", sum(is.na(click_metadata_with_time$Final_UTC_ms)), "\n")
+
+cat("\nPreview final timing fields:\n")
+
+click_metadata_with_time %>%
+  select(
+    EventID,
+    ClickIndexWithinEvent,
+    UID,
+    UTC,
+    UTC_clean,
+    UTC_parsed,
+    Final_UTC_clean,
+    Final_UTC_ms
+  ) %>%
+  head(20) %>%
+  print()
+
+```
+
+## Compute ICI using final cleaned timestamps
+
+```{r}
+
+# ICI is computed within each Tukey EventID.
+# This prevents intervals from crossing between separate click events.
+#
+# Final_UTC_ms is an absolute timestamp in milliseconds.
+# ICI = next click timestamp - current click timestamp
+# ------------------------------------------------------------
+
+click_metadata_with_ici <- click_metadata_with_time %>%
+  arrange(EventID, Final_UTC_ms, SQL_Id, UID) %>%
+  group_by(EventID) %>%
+  mutate(
+    ClickOrderByTime = row_number(),
+    n_clicks_in_event = n(),
+    
+    Previous_UID = lag(UID),
+    Next_UID = lead(UID),
+    
+    Previous_Final_UTC_clean = lag(Final_UTC_clean),
+    Next_Final_UTC_clean = lead(Final_UTC_clean),
+    
+    Previous_Final_UTC_ms = lag(Final_UTC_ms),
+    Next_Final_UTC_ms = lead(Final_UTC_ms),
+    
+    ICI_from_previous_ms = Final_UTC_ms - Previous_Final_UTC_ms,
+    ICI_to_next_ms = Next_Final_UTC_ms - Final_UTC_ms,
+    
+    IsFirstClickInEvent = ClickOrderByTime == 1,
+    IsLastClickInEvent = ClickOrderByTime == n_clicks_in_event
+  ) %>%
+  ungroup() %>%
+  mutate(
+    ICI_to_next_flag = case_when(
+      is.na(ICI_to_next_ms) & IsLastClickInEvent ~ "last_click_no_next_ici",
+      is.na(ICI_to_next_ms) ~ "missing_ici",
+      ICI_to_next_ms < 0 ~ "negative_ici",
+      ICI_to_next_ms == 0 ~ "zero_ici",
+      ICI_to_next_ms > max_reasonable_ici_ms ~ "large_ici",
+      TRUE ~ "reasonable_ici"
+    ),
+    
+    ICI_from_previous_flag = case_when(
+      is.na(ICI_from_previous_ms) & IsFirstClickInEvent ~ "first_click_no_previous_ici",
+      is.na(ICI_from_previous_ms) ~ "missing_ici",
+      ICI_from_previous_ms < 0 ~ "negative_ici",
+      ICI_from_previous_ms == 0 ~ "zero_ici",
+      ICI_from_previous_ms > max_reasonable_ici_ms ~ "large_ici",
+      TRUE ~ "reasonable_ici"
+    )
+  )
+
+cat("Rows in click_metadata_with_ici:", nrow(click_metadata_with_ici), "\n")
+cat("Expected rows:", expected_total_clicks_new, "\n")
+
+if (nrow(click_metadata_with_ici) == expected_total_clicks_new) {
+  cat("\nPASS: ICI table row count matches expected total clicks.\n")
+} else {
+  cat("\nFAIL: ICI table row count does not match expected total clicks.\n")
+}
+
+cat("\nICI_to_next flag counts:\n")
+print(table(click_metadata_with_ici$ICI_to_next_flag, useNA = "ifany"))
+
+cat("\nICI_from_previous flag counts:\n")
+print(table(click_metadata_with_ici$ICI_from_previous_flag, useNA = "ifany"))
+
+```
+
+## Basic ICI sanity checks
+
+```{r}
+
+cat("Negative ICI_to_next values:\n")
+print(sum(click_metadata_with_ici$ICI_to_next_ms < 0, na.rm = TRUE))
+
+cat("\nZero ICI_to_next values:\n")
+print(sum(click_metadata_with_ici$ICI_to_next_ms == 0, na.rm = TRUE))
+
+cat("\nLarge ICI_to_next values greater than max_reasonable_ici_ms:\n")
+print(sum(click_metadata_with_ici$ICI_to_next_ms > max_reasonable_ici_ms, na.rm = TRUE))
+
+cat("\nSummary of all non-NA ICI_to_next_ms:\n")
+print(summary(click_metadata_with_ici$ICI_to_next_ms))
+
+cat("\nSummary of reasonable ICI_to_next_ms only:\n")
+print(
+  summary(
+    click_metadata_with_ici$ICI_to_next_ms[
+      click_metadata_with_ici$ICI_to_next_flag == "reasonable_ici"
+    ]
+  )
+)
+
+cat("\nPreview of computed ICI rows:\n")
+
+click_metadata_with_ici %>%
+  select(
+    EventID,
+    ClickOrderByTime,
+    UID,
+    Final_UTC_clean,
+    Previous_Final_UTC_clean,
+    Next_Final_UTC_clean,
+    ICI_from_previous_ms,
+    ICI_to_next_ms,
+    ICI_to_next_flag
+  ) %>%
+  head(30) %>%
+  print()
+
+```
+
+## Event-level ICI summary
+
+```{r}
+
+# Core summaries use reasonable ICI values only:
+#   ICI_to_next_flag == "reasonable_ici"
+# This excludes:
+#   - last click of each event
+#   - zero-ms timestamp ties
+#   - large gaps > max_reasonable_ici_ms
+# ------------------------------------------------------------
+
+ici_summary_by_event <- click_metadata_with_ici %>%
+  group_by(DriftID, EventID) %>%
+  summarise(
+    n_clicks = n(),
+    
+    n_reasonable_ici = sum(ICI_to_next_flag == "reasonable_ici", na.rm = TRUE),
+    n_zero_ici = sum(ICI_to_next_flag == "zero_ici", na.rm = TRUE),
+    n_large_ici = sum(ICI_to_next_flag == "large_ici", na.rm = TRUE),
+    n_last_click_no_next_ici = sum(ICI_to_next_flag == "last_click_no_next_ici", na.rm = TRUE),
+    
+    percent_reasonable_ici = 100 * n_reasonable_ici / n_clicks,
+    percent_zero_ici = 100 * n_zero_ici / n_clicks,
+    percent_large_ici = 100 * n_large_ici / n_clicks,
+    
+    mean_ici_ms = mean(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    median_ici_ms = median(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    sd_ici_ms = sd(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    min_ici_ms = min(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    max_ici_ms = max(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    
+    .groups = "drop"
+  ) %>%
+  arrange(DriftID, EventID)
+
+cat("ICI summary by EventID:\n")
+print(ici_summary_by_event)
+
+write.csv(
+  ici_summary_by_event,
+  file = file.path(ici_output_dir, "ici_summary_by_event_NEW.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Drift-level ICI summary
+
+```{r}
+
+ici_summary_by_drift <- click_metadata_with_ici %>%
+  group_by(DriftID) %>%
+  summarise(
+    n_clicks = n(),
+    n_events = n_distinct(EventID),
+    
+    n_reasonable_ici = sum(ICI_to_next_flag == "reasonable_ici", na.rm = TRUE),
+    n_zero_ici = sum(ICI_to_next_flag == "zero_ici", na.rm = TRUE),
+    n_large_ici = sum(ICI_to_next_flag == "large_ici", na.rm = TRUE),
+    n_last_click_no_next_ici = sum(ICI_to_next_flag == "last_click_no_next_ici", na.rm = TRUE),
+    
+    percent_reasonable_ici = 100 * n_reasonable_ici / n_clicks,
+    percent_zero_ici = 100 * n_zero_ici / n_clicks,
+    percent_large_ici = 100 * n_large_ici / n_clicks,
+    
+    mean_ici_ms = mean(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    median_ici_ms = median(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    sd_ici_ms = sd(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    min_ici_ms = min(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    max_ici_ms = max(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    
+    .groups = "drop"
+  ) %>%
+  arrange(DriftID)
+
+cat("ICI summary by DriftID:\n")
+print(ici_summary_by_drift)
+
+write.csv(
+  ici_summary_by_drift,
+  file = file.path(ici_output_dir, "ici_summary_by_drift_NEW.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Save final click-level ICI table
+
+```{r}
+
+saveRDS(
+  click_metadata_with_ici,
+  file = file.path(ici_output_dir, "click_metadata_with_ici_NEW.rds")
+)
+
+write.csv(
+  click_metadata_with_ici,
+  file = file.path(ici_output_dir, "click_metadata_with_ici_NEW.csv"),
+  row.names = FALSE
+)
+
+cat("Saved final ICI table:\n")
+cat(file.path(ici_output_dir, "click_metadata_with_ici_NEW.rds"), "\n")
+cat(file.path(ici_output_dir, "click_metadata_with_ici_NEW.csv"), "\n")
+
+cat("\nSaved summary tables:\n")
+cat(file.path(ici_output_dir, "ici_summary_by_event_NEW.csv"), "\n")
+cat(file.path(ici_output_dir, "ici_summary_by_drift_NEW.csv"), "\n")
+
+```
+
+## Locate corrected min-max normalized k-means cluster assignment files
+
+```{r}
+
+cluster_base_dir <- "E:/Analysis/Clustering Output/MinMax_Normalized_ADRIFT003_Corrected/Min-Max Normalized"
+
+if (!dir.exists(cluster_base_dir)) {
+  stop("Cluster base directory does not exist: ", cluster_base_dir)
+}
+
+all_cluster_files <- list.files(
+  path = cluster_base_dir,
+  pattern = "\\.(csv|rds|RDS)$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+cluster_file_candidates <- data.frame(
+  File = all_cluster_files,
+  FileName = basename(all_cluster_files),
+  Folder = dirname(all_cluster_files),
+  stringsAsFactors = FALSE
+) %>%
+  filter(
+    str_detect(tolower(FileName), "cluster|assignment|label|kmeans|click") |
+      str_detect(tolower(Folder), "kmeans|cluster|k=")
+  ) %>%
+  arrange(File)
+
+cat("Cluster base directory:\n")
+cat(cluster_base_dir, "\n\n")
+
+cat("Total csv/rds files found:", length(all_cluster_files), "\n")
+cat("Number of possible cluster assignment files found:",
+    nrow(cluster_file_candidates), "\n\n")
+
+print(cluster_file_candidates)
+
+write.csv(
+  cluster_file_candidates,
+  file = file.path(ici_output_dir, "corrected_cluster_file_candidates_NEW.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Preview corrected cluster file candidates
+
+```{r}
+
+preview_cluster_file <- function(file_path) {
+  
+  cat("\n============================\n")
+  cat("FILE:\n")
+  cat(file_path, "\n")
+  cat("============================\n")
+  
+  if (str_detect(tolower(file_path), "\\.csv$")) {
+    
+    preview <- read.csv(file_path, nrows = 10)
+    
+    cat("CSV columns:\n")
+    print(names(preview))
+    
+    cat("\nPreview:\n")
+    print(preview)
+    
+  } else if (str_detect(tolower(file_path), "\\.rds$")) {
+    
+    obj <- readRDS(file_path)
+    
+    cat("RDS class:\n")
+    print(class(obj))
+    
+    if (is.data.frame(obj)) {
+      cat("\nRDS dataframe columns:\n")
+      print(names(obj))
+      
+      cat("\nPreview:\n")
+      print(head(obj, 10))
+    } else if (is.list(obj)) {
+      cat("\nRDS list names:\n")
+      print(names(obj))
+      cat("\nStructure preview:\n")
+      print(str(obj, max.level = 2))
+    } else {
+      cat("\nObject structure:\n")
+      print(str(obj))
+    }
+  }
+}
+
+# Preview up to 30 candidates
+files_to_preview <- head(cluster_file_candidates$File, 30)
+
+for (f in files_to_preview) {
+  preview_cluster_file(f)
+}
+
+```
+
+## Merge ICI with corrected min-max k-means cluster assignments
+
+```{r merge-ici-with-corrected-kmeans-clusters}
+
+# This reads the existing clustering outputs but DOES NOT edit them.
+# New merged files are written to a new ICI output folder.
+# ------------------------------------------------------------
+
+cluster_base_dir <- "E:/Analysis/Clustering Output/MinMax_Normalized_ADRIFT003_Corrected/Min-Max Normalized"
+
+merged_cluster_ici_dir <- file.path(
+  ici_output_dir,
+  "ICI_Merged_With_Corrected_MinMax_KMeans"
+)
+
+dir.create(merged_cluster_ici_dir, recursive = TRUE, showWarnings = FALSE)
+
+k_values_to_merge <- 2:12
+
+# Keep only the ICI/timing fields we need for cluster-level summaries and plotting
+ici_for_merge <- click_metadata_with_ici %>%
+  select(
+    EventID,
+    UID,
+    ClickIndexWithinEvent,
+    DriftID,
+    Final_UTC_clean,
+    Final_UTC_ms,
+    ICI_to_next_ms,
+    ICI_to_next_flag,
+    ICI_from_previous_ms,
+    ICI_from_previous_flag,
+    IsFirstClickInEvent,
+    IsLastClickInEvent
+  ) %>%
+  mutate(
+    UID = as.character(UID)
+  )
+
+# Sanity check: ICI table should have one row per EventID + UID
+ici_duplicate_check <- ici_for_merge %>%
+  count(EventID, UID, name = "n") %>%
+  filter(n > 1)
+
+if (nrow(ici_duplicate_check) > 0) {
+  stop("ICI table has duplicated EventID + UID rows. Do not merge yet.")
+}
+
+merged_kmeans_ici_list <- list()
+
+for (k in k_values_to_merge) {
+  
+  cat("\n============================\n")
+  cat("Processing k =", k, "\n")
+  cat("============================\n")
+  
+  cluster_file <- file.path(
+    cluster_base_dir,
+    paste0("kmeans k_", k),
+    "data",
+    "cluster_assignments_full.csv"
+  )
+  
+  if (!file.exists(cluster_file)) {
+    warning("Missing cluster assignment file for k = ", k, ": ", cluster_file)
+    next
+  }
+  
+  cluster_assignments <- read.csv(cluster_file, stringsAsFactors = FALSE) %>%
+    mutate(
+      UID = as.character(UID),
+      k = k,
+      cluster = as.integer(cluster),
+      cluster_label = paste0("k", k, "_cluster_", cluster)
+    )
+  
+  required_cluster_cols <- c("EventID", "UID", "cluster")
+  
+  missing_cluster_cols <- setdiff(required_cluster_cols, names(cluster_assignments))
+  
+  if (length(missing_cluster_cols) > 0) {
+    stop(
+      "Cluster file for k = ", k,
+      " is missing required columns: ",
+      paste(missing_cluster_cols, collapse = ", ")
+    )
+  }
+  
+  cluster_duplicate_check <- cluster_assignments %>%
+    count(EventID, UID, name = "n") %>%
+    filter(n > 1)
+  
+  if (nrow(cluster_duplicate_check) > 0) {
+    stop("Cluster assignments for k = ", k, " have duplicated EventID + UID rows.")
+  }
+  
+  merged_kmeans_ici <- cluster_assignments %>%
+    left_join(
+      ici_for_merge,
+      by = c("EventID", "UID")
+    )
+  
+  cat("Rows in cluster assignments:", nrow(cluster_assignments), "\n")
+  cat("Rows after ICI merge:", nrow(merged_kmeans_ici), "\n")
+  cat("Rows missing ICI_to_next_flag:", sum(is.na(merged_kmeans_ici$ICI_to_next_flag)), "\n")
+  
+  if (nrow(merged_kmeans_ici) != nrow(cluster_assignments)) {
+    stop("Merge changed row count for k = ", k)
+  }
+  
+  if (sum(is.na(merged_kmeans_ici$ICI_to_next_flag)) > 0) {
+    stop("Some cluster rows did not find matching ICI rows for k = ", k)
+  }
+  
+  # Save one merged file per k
+  per_k_output_dir <- file.path(
+    merged_cluster_ici_dir,
+    paste0("kmeans_k_", k)
+  )
+  
+  dir.create(per_k_output_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  saveRDS(
+    merged_kmeans_ici,
+    file = file.path(per_k_output_dir, paste0("kmeans_k_", k, "_with_ici_NEW.rds"))
+  )
+  
+  write.csv(
+    merged_kmeans_ici,
+    file = file.path(per_k_output_dir, paste0("kmeans_k_", k, "_with_ici_NEW.csv")),
+    row.names = FALSE
+  )
+  
+  merged_kmeans_ici_list[[paste0("k_", k)]] <- merged_kmeans_ici
+}
+
+# Combine all k values into one long-format object
+merged_kmeans_ici_all_k <- bind_rows(merged_kmeans_ici_list)
+
+saveRDS(
+  merged_kmeans_ici_all_k,
+  file = file.path(merged_cluster_ici_dir, "kmeans_all_k_with_ici_NEW.rds")
+)
+
+cat("\n============================\n")
+cat("Finished merging ICI with corrected k-means clusters.\n")
+cat("============================\n")
+
+cat("Combined all-k rows:", nrow(merged_kmeans_ici_all_k), "\n")
+cat("Expected rows if all k = 2:12 are present:",
+    expected_total_clicks_new * length(k_values_to_merge), "\n")
+
+cat("\nMerged outputs saved to:\n")
+cat(merged_cluster_ici_dir, "\n")
+
+```
+
+## Summarize ICI by k-means cluster
+
+```{r summarize-ici-by-kmeans-cluster}
+
+# Main biological summaries use reasonable ICI only:
+#   ICI_to_next_flag == "reasonable_ici"
+# ------------------------------------------------------------
+
+ici_summary_by_kmeans_cluster <- merged_kmeans_ici_all_k %>%
+  group_by(k, cluster, cluster_label) %>%
+  summarise(
+    n_clicks = n(),
+    
+    n_reasonable_ici = sum(ICI_to_next_flag == "reasonable_ici", na.rm = TRUE),
+    n_zero_ici = sum(ICI_to_next_flag == "zero_ici", na.rm = TRUE),
+    n_large_ici = sum(ICI_to_next_flag == "large_ici", na.rm = TRUE),
+    n_last_click_no_next_ici = sum(ICI_to_next_flag == "last_click_no_next_ici", na.rm = TRUE),
+    
+    percent_reasonable_ici = 100 * n_reasonable_ici / n_clicks,
+    percent_zero_ici = 100 * n_zero_ici / n_clicks,
+    percent_large_ici = 100 * n_large_ici / n_clicks,
+    
+    mean_ici_ms = mean(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    median_ici_ms = median(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    sd_ici_ms = sd(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    q25_ici_ms = quantile(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      probs = 0.25,
+      na.rm = TRUE
+    ),
+    q75_ici_ms = quantile(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      probs = 0.75,
+      na.rm = TRUE
+    ),
+    min_ici_ms = min(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    max_ici_ms = max(
+      ICI_to_next_ms[ICI_to_next_flag == "reasonable_ici"],
+      na.rm = TRUE
+    ),
+    
+    .groups = "drop"
+  ) %>%
+  arrange(k, cluster)
+
+cat("ICI summary by corrected min-max k-means cluster:\n")
+print(ici_summary_by_kmeans_cluster)
+
+write.csv(
+  ici_summary_by_kmeans_cluster,
+  file = file.path(
+    merged_cluster_ici_dir,
+    "ici_summary_by_corrected_minmax_kmeans_cluster_NEW.csv"
+  ),
+  row.names = FALSE
+)
+
+```
+
+## Generate ICI boxplots for every k value
+
+```{r}
+
+# For each k:
+#   x-axis = spectral cluster
+#   y-axis = ICI to next click in ms
+#   data = reasonable ICI values only
+#
+# Output:
+#   one PNG per k value
+# ------------------------------------------------------------
+
+ici_boxplot_dir <- file.path(
+  merged_cluster_ici_dir,
+  "plots",
+  "boxplots_by_k"
+)
+
+dir.create(ici_boxplot_dir, recursive = TRUE, showWarnings = FALSE)
+
+k_values_to_plot <- sort(unique(merged_kmeans_ici_all_k$k))
+
+for (current_k in k_values_to_plot) {
+  
+  cat("\n============================\n")
+  cat("Plotting k =", current_k, "\n")
+  cat("============================\n")
+  
+  plot_data_k <- merged_kmeans_ici_all_k %>%
+    filter(
+      k == current_k,
+      ICI_to_next_flag == "reasonable_ici"
+    ) %>%
+    mutate(
+      cluster = factor(cluster)
+    )
+  
+  cat("Rows used:", nrow(plot_data_k), "\n")
+  
+  cluster_counts_k <- plot_data_k %>%
+    count(cluster, name = "n_reasonable_ici") %>%
+    arrange(cluster)
+  
+  print(cluster_counts_k)
+  
+  p <- ggplot(
+    plot_data_k,
+    aes(x = cluster, y = ICI_to_next_ms)
+  ) +
+    geom_boxplot(
+      outlier.alpha = 0.08,
+      outlier.size = 0.35
+    ) +
+    labs(
+      title = paste0("ICI Distribution by Spectral Cluster, k = ", current_k),
+      subtitle = "Corrected min-max normalized k-means clusters; reasonable ICI values only",
+      x = "Spectral cluster",
+      y = "ICI to next click (ms)"
+    ) +
+    theme_bw(base_size = 13)
+  
+  print(p)
+  
+  ggsave(
+    filename = file.path(
+      ici_boxplot_dir,
+      paste0("ici_boxplot_by_cluster_k_", current_k, ".png")
+    ),
+    plot = p,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
+}
+
+cat("\nSaved all k-specific boxplots to:\n")
+cat(ici_boxplot_dir, "\n")
+
+```
+
+## Generate zoomed ICI boxplots for every k value
+
+```{r}
+
+ici_boxplot_zoom_dir <- file.path(
+  merged_cluster_ici_dir,
+  "plots",
+  "boxplots_by_k_zoomed_0_200ms"
+)
+
+dir.create(ici_boxplot_zoom_dir, recursive = TRUE, showWarnings = FALSE)
+
+k_values_to_plot <- sort(unique(merged_kmeans_ici_all_k$k))
+
+for (current_k in k_values_to_plot) {
+  
+  plot_data_k <- merged_kmeans_ici_all_k %>%
+    filter(
+      k == current_k,
+      ICI_to_next_flag == "reasonable_ici"
+    ) %>%
+    mutate(
+      cluster = factor(cluster)
+    )
+  
+  p <- ggplot(
+    plot_data_k,
+    aes(x = cluster, y = ICI_to_next_ms)
+  ) +
+    geom_boxplot(
+      outlier.alpha = 0.04,
+      outlier.size = 0.25
+    ) +
+    coord_cartesian(ylim = c(0, 200)) +
+    labs(
+      title = paste0("ICI Distribution by Spectral Cluster, k = ", current_k),
+      subtitle = "Zoomed to 0–200 ms; reasonable ICI values only",
+      x = "Spectral cluster",
+      y = "ICI to next click (ms)"
+    ) +
+    theme_bw(base_size = 13)
+  
+  print(p)
+  
+  ggsave(
+    filename = file.path(
+      ici_boxplot_zoom_dir,
+      paste0("ici_boxplot_by_cluster_k_", current_k, "_zoom_0_200ms.png")
+    ),
+    plot = p,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
+}
+
+cat("\nSaved zoomed boxplots to:\n")
+cat(ici_boxplot_zoom_dir, "\n")
+
+```
+
+## Clean summary table of ICI by k-means cluster
+
+```{r}
+
+ici_cluster_summary_clean <- merged_kmeans_ici_all_k %>%
+  filter(ICI_to_next_flag == "reasonable_ici") %>%
+  group_by(k, cluster) %>%
+  summarise(
+    n_clicks = n(),
+    median_ici_ms = median(ICI_to_next_ms, na.rm = TRUE),
+    mean_ici_ms = mean(ICI_to_next_ms, na.rm = TRUE),
+    q25_ici_ms = quantile(ICI_to_next_ms, 0.25, na.rm = TRUE),
+    q75_ici_ms = quantile(ICI_to_next_ms, 0.75, na.rm = TRUE),
+    iqr_ici_ms = IQR(ICI_to_next_ms, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(k, cluster)
+
+print(ici_cluster_summary_clean)
+
+write.csv(
+  ici_cluster_summary_clean,
+  file = file.path(
+    merged_cluster_ici_dir,
+    "ici_cluster_summary_clean_reasonable_only_NEW.csv"
+  ),
+  row.names = FALSE
+)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
