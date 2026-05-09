@@ -1,0 +1,763 @@
+---
+title: "Diel_Plot"
+author: "Sarah Moseley"
+date: "2026-05-09"
+output: html_document
+---
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(lubridate)
+library(suncalc)
+library(scales)
+
+theme_set(theme_bw(base_size = 13))
+
+```
+
+
+## Chunk 3 — paths
+
+```{r paths}
+
+analysis_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1"
+
+event_tables_dir <- file.path(
+  analysis_dir,
+  "mapping_outputs/by_event/tables"
+)
+
+output_dir <- file.path(
+  analysis_dir,
+  "diel_event_plots"
+)
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+event_comp_with_noise_file <- file.path(
+  event_tables_dir,
+  "event_cluster_composition_WITH_noise_18PC_scaledICI_1_minPts50.csv"
+)
+
+event_comp_no_noise_file <- file.path(
+  event_tables_dir,
+  "event_cluster_composition_NO_noise_18PC_scaledICI_1_minPts50.csv"
+)
+
+detections_file <- "E:/Logs/ADRIFT_GgDetections.csv"
+
+```
+
+
+## Chunk 4 — load data
+
+```{r load-data}
+
+event_comp_with_noise <- read_csv(event_comp_with_noise_file, show_col_types = FALSE)
+event_comp_no_noise   <- read_csv(event_comp_no_noise_file, show_col_types = FALSE)
+detections            <- read_csv(detections_file, show_col_types = FALSE)
+
+glimpse(event_comp_with_noise)
+glimpse(event_comp_no_noise)
+glimpse(detections)
+
+```
+
+## Clean and Standardize IDs
+
+```{r clean-ids}
+
+clean_event_id <- function(x) {
+  x %>%
+    as.character() %>%
+    str_trim() %>%
+    str_replace_all("\\s+", "_")
+}
+
+event_comp_with_noise <- event_comp_with_noise %>%
+  mutate(
+    EventID_clean = clean_event_id(EventID_clean),
+    DriftID_clean = as.character(DriftID_clean),
+    DriftName = as.character(DriftName),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+event_comp_no_noise <- event_comp_no_noise %>%
+  mutate(
+    EventID_clean = clean_event_id(EventID_clean),
+    DriftID_clean = as.character(DriftID_clean),
+    DriftName = as.character(DriftName),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+detections %>%
+  filter(EventID_clean %in% event_comp_with_noise$EventID_clean) %>%
+  count(DriftName)
+
+# Quick QA checks
+event_comp_with_noise %>% count(HDBSCAN_cluster)
+event_comp_no_noise %>% count(HDBSCAN_cluster)
+
+detections %>%
+  filter(EventID_clean %in% event_comp_with_noise$EventID_clean) %>%
+  count(DriftName)
+
+# Confirm detection table matches the 48 events used in this analysis
+n_used_events_in_detections <- detections %>%
+  filter(EventID_clean %in% event_comp_with_noise$EventID_clean) %>%
+  distinct(EventID_clean) %>%
+  nrow()
+
+cat("Number of used analysis events found in detection table:", n_used_events_in_detections, "\n")
+
+stopifnot(n_used_events_in_detections == 48)
+
+```
+
+## Identify Dominant Click Type per Event
+
+```{r}
+
+dominant_with_unassigned <- event_comp_with_noise %>%
+  group_by(EventID_clean) %>%
+  arrange(desc(n_clicks), HDBSCAN_cluster, .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  transmute(
+    EventID_clean,
+    DriftID_clean,
+    DriftName,
+    Latitude,
+    Longitude,
+    dominant_cluster_with_unassigned = HDBSCAN_cluster,
+    dominant_cluster_with_unassigned_n = n_clicks,
+    dominant_cluster_with_unassigned_percent = percent,
+    total_clicks_event
+  )
+
+dominant_assigned_only <- event_comp_no_noise %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  group_by(EventID_clean) %>%
+  arrange(desc(n_clicks), HDBSCAN_cluster, .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  transmute(
+    EventID_clean,
+    dominant_cluster_assigned_only = HDBSCAN_cluster,
+    dominant_cluster_assigned_only_n = n_clicks,
+    dominant_cluster_assigned_only_percent = percent
+  )
+
+# QA: should be 48 events
+cat("Dominant events including unassigned:", nrow(dominant_with_unassigned), "\n")
+cat("Dominant events assigned only:", nrow(dominant_assigned_only), "\n")
+
+stopifnot(nrow(dominant_with_unassigned) == 48)
+
+# Check dominant cluster counts
+dominant_with_unassigned %>%
+  count(dominant_cluster_with_unassigned, name = "n_events")
+
+dominant_assigned_only %>%
+  count(dominant_cluster_assigned_only, name = "n_events")
+
+```
+
+## Join Event Timing from Detection Table
+
+```{r}
+
+event_timing <- detections %>%
+  filter(EventID_clean %in% dominant_with_unassigned$EventID_clean) %>%
+  mutate(
+    UTC_start_raw = UTC,
+    UTC_end_raw = end,
+
+    UTC_start = ymd_hms(UTC_start_raw, tz = "UTC"),
+    UTC_end = ymd_hms(UTC_end_raw, tz = "UTC"),
+
+    event_duration_min = as.numeric(
+      difftime(UTC_end, UTC_start, units = "mins")
+    ),
+
+    date_utc = as.Date(UTC_start),
+
+    hour_utc = hour(UTC_start) +
+      minute(UTC_start) / 60 +
+      second(UTC_start) / 3600,
+
+    end_hour_utc = hour(UTC_end) +
+      minute(UTC_end) / 60 +
+      second(UTC_end) / 3600
+  ) %>%
+  select(
+    EventID_clean,
+    UTC_start_raw,
+    UTC_end_raw,
+    UTC_start,
+    UTC_end,
+    event_duration_min,
+    date_utc,
+    hour_utc,
+    end_hour_utc,
+    species,
+    call,
+    DataQuality,
+    gpsUncertainty
+  ) %>%
+  distinct(EventID_clean, .keep_all = TRUE)
+
+diel_events <- dominant_with_unassigned %>%
+  left_join(dominant_assigned_only, by = "EventID_clean") %>%
+  left_join(event_timing, by = "EventID_clean")
+
+# QA checks
+diel_events %>%
+  summarise(
+    n_events = n(),
+    n_with_start_time = sum(!is.na(UTC_start)),
+    n_missing_start_time = sum(is.na(UTC_start)),
+    n_with_end_time = sum(!is.na(UTC_end)),
+    n_missing_end_time = sum(is.na(UTC_end)),
+    min_date = min(date_utc, na.rm = TRUE),
+    max_date = max(date_utc, na.rm = TRUE),
+    median_duration_min = median(event_duration_min, na.rm = TRUE),
+    max_duration_min = max(event_duration_min, na.rm = TRUE)
+  )
+
+stopifnot(nrow(diel_events) == 48)
+stopifnot(sum(is.na(diel_events$UTC_start)) == 0)
+
+```
+
+## Calculate Median Event Location
+
+```{r}
+
+median_lat <- median(diel_events$Latitude, na.rm = TRUE)
+median_lon <- median(diel_events$Longitude, na.rm = TRUE)
+
+cat("Median latitude of used events:", median_lat, "\n")
+cat("Median longitude of used events:", median_lon, "\n")
+
+# QA: make sure location is present for all 48 analyzed events
+diel_events %>%
+  summarise(
+    n_events = n(),
+    n_with_latitude = sum(!is.na(Latitude)),
+    n_with_longitude = sum(!is.na(Longitude)),
+    min_latitude = min(Latitude, na.rm = TRUE),
+    max_latitude = max(Latitude, na.rm = TRUE),
+    min_longitude = min(Longitude, na.rm = TRUE),
+    max_longitude = max(Longitude, na.rm = TRUE)
+  )
+
+stopifnot(nrow(diel_events) == 48)
+stopifnot(sum(is.na(diel_events$Latitude)) == 0)
+stopifnot(sum(is.na(diel_events$Longitude)) == 0)
+
+```
+
+## Calculate Sunrise and Sunset Times
+
+```{r}
+
+date_sequence <- seq(
+  min(diel_events$date_utc, na.rm = TRUE),
+  max(diel_events$date_utc, na.rm = TRUE),
+  by = "day"
+)
+
+sun_times <- getSunlightTimes(
+  date = date_sequence,
+  lat = median_lat,
+  lon = median_lon,
+  keep = c("sunrise", "sunset"),
+  tz = "UTC"
+) %>%
+  as_tibble() %>%
+  mutate(
+    date_utc = as.Date(date),
+
+    sunrise_hour_utc = hour(sunrise) +
+      minute(sunrise) / 60 +
+      second(sunrise) / 3600,
+
+    sunset_hour_utc = hour(sunset) +
+      minute(sunset) / 60 +
+      second(sunset) / 3600
+  ) %>%
+  select(
+    date_utc,
+    sunrise,
+    sunset,
+    sunrise_hour_utc,
+    sunset_hour_utc
+  )
+
+# QA
+sun_times %>%
+  summarise(
+    n_dates = n(),
+    min_date = min(date_utc),
+    max_date = max(date_utc),
+    min_sunrise_hour_utc = min(sunrise_hour_utc, na.rm = TRUE),
+    max_sunrise_hour_utc = max(sunrise_hour_utc, na.rm = TRUE),
+    min_sunset_hour_utc = min(sunset_hour_utc, na.rm = TRUE),
+    max_sunset_hour_utc = max(sunset_hour_utc, na.rm = TRUE)
+  )
+
+head(sun_times)
+
+```
+
+## Correct Sunrise and Sunset Hours for UTC Day Wrap
+
+```{r}
+
+sun_times <- sun_times %>%
+  mutate(
+    sunset_date_utc = as.Date(sunset),
+    sunset_hour_utc_raw = sunset_hour_utc,
+
+    sunset_hour_utc = if_else(
+      sunset_date_utc > date_utc,
+      sunset_hour_utc + 24,
+      sunset_hour_utc
+    )
+  )
+
+# QA: sunset should now be after sunrise
+sun_times %>%
+  summarise(
+    n_dates = n(),
+    min_sunrise_hour_utc = min(sunrise_hour_utc, na.rm = TRUE),
+    max_sunrise_hour_utc = max(sunrise_hour_utc, na.rm = TRUE),
+    min_sunset_hour_utc = min(sunset_hour_utc, na.rm = TRUE),
+    max_sunset_hour_utc = max(sunset_hour_utc, na.rm = TRUE),
+    any_sunset_before_sunrise = any(sunset_hour_utc < sunrise_hour_utc, na.rm = TRUE)
+  )
+
+stopifnot(!any(sun_times$sunset_hour_utc < sun_times$sunrise_hour_utc, na.rm = TRUE))
+
+```
+
+## Join Sunrise and Sunset Times to Events
+
+```{r}
+
+diel_events <- diel_events %>%
+  left_join(
+    sun_times %>%
+      select(
+        date_utc,
+        sunrise,
+        sunset,
+        sunrise_hour_utc,
+        sunset_hour_utc
+      ),
+    by = "date_utc"
+  ) %>%
+  mutate(
+    hour_utc_plot = hour_utc,
+
+    period_utc = case_when(
+      hour_utc_plot < sunrise_hour_utc ~ "Night",
+      hour_utc_plot >= sunrise_hour_utc & hour_utc_plot <= 24 ~ "Day",
+      TRUE ~ NA_character_
+    )
+  )
+
+# QA
+diel_events %>%
+  count(period_utc)
+
+write_csv(
+  diel_events,
+  file.path(output_dir, "diel_events_with_dominant_click_type_and_sun_times.csv")
+)
+
+```
+
+## Define Cluster Colors
+
+```{r}
+
+rainbow_cluster_colors <- c(
+  "1"  = "#E41A1C",  # red
+  "2"  = "#FF7F00",  # orange
+  "3"  = "#FFD92F",  # yellow
+  "4"  = "#4DAF4A",  # green
+  "5"  = "#00BFC4",  # cyan
+  "6"  = "#377EB8",  # blue
+  "7"  = "#984EA3",  # purple
+  "8"  = "#F781BF",  # pink
+  "9"  = "#A65628",  # brown
+  "10" = "#999999",
+  "11" = "#66C2A5",
+  "12" = "#FC8D62",
+  "13" = "#8DA0CB",
+  "14" = "#E78AC3",
+  "15" = "#A6D854"
+)
+
+all_clusters <- sort(unique(as.character(diel_events$dominant_cluster_with_unassigned)))
+non_noise <- setdiff(all_clusters, "0")
+
+cluster_colors_with_unassigned <- c(
+  "0" = "grey35",
+  rainbow_cluster_colors[non_noise]
+)
+
+cluster_colors_assigned_only <- rainbow_cluster_colors[
+  sort(unique(as.character(diel_events$dominant_cluster_assigned_only)))
+]
+
+cluster_colors_with_unassigned
+cluster_colors_assigned_only
+
+```
+
+## Plot Diel Detections Including Cluster 0
+
+```{r}
+
+p_diel_with_unassigned <- ggplot(diel_events, aes(x = hour_utc, y = date_utc)) +
+  geom_rect(
+    data = sun_times,
+    aes(
+      xmin = 0,
+      xmax = sunrise_hour_utc,
+      ymin = date_utc - 0.5,
+      ymax = date_utc + 0.5
+    ),
+    inherit.aes = FALSE,
+    fill = "grey90",
+    alpha = 0.9
+  ) +
+  geom_rect(
+    data = sun_times,
+    aes(
+      xmin = sunset_hour_utc,
+      xmax = 28,
+      ymin = date_utc - 0.5,
+      ymax = date_utc + 0.5
+    ),
+    inherit.aes = FALSE,
+    fill = "grey90",
+    alpha = 0.9
+  ) +
+  geom_point(
+    aes(color = dominant_cluster_with_unassigned),
+    size = 3,
+    alpha = 0.95
+  ) +
+  scale_color_manual(values = cluster_colors_with_unassigned, drop = FALSE) +
+  scale_x_continuous(
+    limits = c(0, 28),
+    breaks = seq(0, 24, by = 3),
+    labels = function(x) sprintf("%02d:00", x %% 24)
+  ) +
+  scale_y_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  labs(
+    title = "Diel Distribution of Risso's Dolphin Events",
+    subtitle = paste0(
+      "Colored by predominant cluster including cluster 0; sunrise/sunset from median location (",
+      round(median_lat, 3), ", ", round(median_lon, 3), ")"
+    ),
+    x = "Hour of day UTC",
+    y = "Date UTC",
+    color = "Dominant cluster"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+p_diel_with_unassigned
+
+ggsave(
+  file.path(output_dir, "diel_plot_WITH_cluster0.png"),
+  p_diel_with_unassigned,
+  width = 10,
+  height = 7,
+  dpi = 300
+)
+
+```
+
+## Plot Diel Detections Including Cluster 0 — Event-Date Version
+
+```{r}
+
+# ------------------------------------------------------------
+# Convert event and sun times to fixed local plotting time: UTC-7
+# This matches the example style: h (UTC-7.0)
+# ------------------------------------------------------------
+
+utc_offset_hours <- -7
+
+plot_dates <- diel_events %>%
+  distinct(date_utc) %>%
+  arrange(date_utc) %>%
+  mutate(date_index = row_number())
+
+plot_events_with_unassigned <- diel_events %>%
+  left_join(plot_dates, by = "date_utc") %>%
+  mutate(
+    hour_local = (hour_utc + utc_offset_hours) %% 24,
+    dominant_cluster_with_unassigned = factor(
+      dominant_cluster_with_unassigned,
+      levels = names(cluster_colors_with_unassigned)
+    )
+  )
+
+plot_sun_times <- sun_times %>%
+  inner_join(plot_dates, by = "date_utc") %>%
+  mutate(
+    sunrise_hour_local = (sunrise_hour_utc + utc_offset_hours) %% 24,
+    sunset_hour_local = ((sunset_hour_utc %% 24) + utc_offset_hours) %% 24
+  )
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+p_diel_with_unassigned <- ggplot(
+  plot_events_with_unassigned,
+  aes(x = hour_local, y = date_index)
+) +
+  # Night before sunrise
+  geom_rect(
+    data = plot_sun_times,
+    aes(
+      xmin = 0,
+      xmax = sunrise_hour_local,
+      ymin = date_index - 0.45,
+      ymax = date_index + 0.45
+    ),
+    inherit.aes = FALSE,
+    fill = "grey85",
+    alpha = 0.9
+  ) +
+  # Night after sunset
+  geom_rect(
+    data = plot_sun_times,
+    aes(
+      xmin = sunset_hour_local,
+      xmax = 24,
+      ymin = date_index - 0.45,
+      ymax = date_index + 0.45
+    ),
+    inherit.aes = FALSE,
+    fill = "grey85",
+    alpha = 0.9
+  ) +
+  geom_linerange(
+    aes(
+      ymin = date_index - 0.28,
+      ymax = date_index + 0.28,
+      color = dominant_cluster_with_unassigned
+    ),
+    linewidth = 1.0,
+    alpha = 1
+  ) +
+  scale_color_manual(values = cluster_colors_with_unassigned, drop = FALSE) +
+  scale_x_continuous(
+    limits = c(0, 24),
+    breaks = seq(0, 24, by = 3)
+  ) +
+  scale_y_continuous(
+    breaks = plot_dates$date_index,
+    labels = format(plot_dates$date_utc, "%d-%b-%Y"),
+    expand = expansion(mult = c(0.02, 0.02))
+  ) +
+  labs(
+    x = "h (UTC-7.0)",
+    y = NULL,
+    color = "Dominant cluster"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+p_diel_with_unassigned
+
+ggsave(
+  file.path(output_dir, "diel_plot_WITH_cluster0_UTCminus7_event_dates_only.png"),
+  p_diel_with_unassigned,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
+```
+
+## Plot Diel Detections Excluding Cluster 0 — Local Time UTC-7
+
+```{r}
+
+plot_events_assigned_only <- diel_events %>%
+  filter(!is.na(dominant_cluster_assigned_only)) %>%
+  left_join(plot_dates, by = "date_utc") %>%
+  mutate(
+    hour_local = (hour_utc + utc_offset_hours) %% 24,
+    dominant_cluster_assigned_only = factor(
+      dominant_cluster_assigned_only,
+      levels = names(cluster_colors_assigned_only)
+    )
+  )
+
+p_diel_assigned_only <- ggplot(
+  plot_events_assigned_only,
+  aes(x = hour_local, y = date_index)
+) +
+  geom_rect(
+    data = plot_sun_times,
+    aes(
+      xmin = 0,
+      xmax = sunrise_hour_local,
+      ymin = date_index - 0.45,
+      ymax = date_index + 0.45
+    ),
+    inherit.aes = FALSE,
+    fill = "grey85",
+    alpha = 0.9
+  ) +
+  geom_rect(
+    data = plot_sun_times,
+    aes(
+      xmin = sunset_hour_local,
+      xmax = 24,
+      ymin = date_index - 0.45,
+      ymax = date_index + 0.45
+    ),
+    inherit.aes = FALSE,
+    fill = "grey85",
+    alpha = 0.9
+  ) +
+  geom_linerange(
+    aes(
+      ymin = date_index - 0.28,
+      ymax = date_index + 0.28,
+      color = dominant_cluster_assigned_only
+    ),
+    linewidth = 1.0,
+    alpha = 1
+  ) +
+  scale_color_manual(values = cluster_colors_assigned_only, drop = FALSE) +
+  scale_x_continuous(
+    limits = c(0, 24),
+    breaks = seq(0, 24, by = 3)
+  ) +
+  scale_y_continuous(
+    breaks = plot_dates$date_index,
+    labels = format(plot_dates$date_utc, "%d-%b-%Y"),
+    expand = expansion(mult = c(0.02, 0.02))
+  ) +
+  labs(
+    x = "h (UTC-7.0)",
+    y = NULL,
+    color = "Dominant assigned cluster"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+p_diel_assigned_only
+
+ggsave(
+  file.path(output_dir, "diel_plot_ASSIGNED_only_UTCminus7_event_dates_only.png"),
+  p_diel_assigned_only,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
+```
+
+```{r}
+
+core_diel_events <- diel_events %>%
+  select(
+    EventID_clean,
+    DriftID_clean,
+    DriftName,
+    Latitude,
+    Longitude,
+
+    dominant_cluster_with_unassigned,
+    dominant_cluster_with_unassigned_n,
+    dominant_cluster_with_unassigned_percent,
+
+    dominant_cluster_assigned_only,
+    dominant_cluster_assigned_only_n,
+    dominant_cluster_assigned_only_percent,
+
+    total_clicks_event,
+
+    UTC_start_raw,
+    UTC_end_raw,
+    UTC_start,
+    UTC_end,
+
+    event_duration_min,
+
+    date_utc,
+    hour_utc,
+    end_hour_utc,
+
+    species,
+    call,
+    DataQuality,
+    gpsUncertainty
+  )
+
+write_csv(
+  core_diel_events,
+  file.path(
+    output_dir,
+    "core_diel_events_with_dominant_clusters.csv"
+  )
+)
+
+cat(
+  "Saved core diel event table:\n",
+  file.path(
+    output_dir,
+    "core_diel_events_with_dominant_clusters.csv"
+  ),
+  "\n"
+)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

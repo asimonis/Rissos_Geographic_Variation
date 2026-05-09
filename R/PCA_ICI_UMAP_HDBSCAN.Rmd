@@ -1,0 +1,7094 @@
+---
+title: "PCA_ICI_UMAP_HDBSCAN"
+author: "Sarah Moseley"
+date: "2026-05-07"
+output: html_documenthtml_document:
+    toc: true
+    toc_float: true
+    theme: readable
+---
+
+## Setup
+
+```{r}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+required_packages <- c(
+  "dplyr",
+  "ggplot2",
+  "tidyr",
+  "stringr",
+  "readr",
+  "purrr",
+  "tibble",
+  "RColorBrewer",
+  "uwot",
+  "dbscan"
+)
+
+missing_packages <- required_packages[
+  !sapply(required_packages, requireNamespace, quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing required packages: ",
+    paste(missing_packages, collapse = ", "),
+    "\nInstall them before running this workflow."
+  )
+}
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(readr)
+library(purrr)
+library(tibble)
+library(RColorBrewer)
+library(uwot)
+library(dbscan)
+
+```
+
+## User Settings
+
+```{r}
+
+# ------------------------------------------------------------
+# Input files
+# ------------------------------------------------------------
+
+# Corrected combined Tukey object
+# This should be the fixed combined file where ADRIFT_003_Event_001 has already been corrected.
+combined_file <- file.choose()
+
+# Previously generated click-level ICI table
+# This should come from your ICI workflow:
+# click_metadata_with_ici_NEW.rds
+ici_file <- file.choose()
+
+# ------------------------------------------------------------
+# Output folder
+# ------------------------------------------------------------
+
+output_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN"
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+plot_dir <- file.path(output_dir, "plots")
+data_dir <- file.path(output_dir, "data")
+table_dir <- file.path(output_dir, "tables")
+
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Spectral settings
+# ------------------------------------------------------------
+
+freq_min_khz <- 19
+freq_max_khz <- 50
+
+# ------------------------------------------------------------
+# ICI filtering settings
+# ------------------------------------------------------------
+
+ici_min_s <- 0.01
+ici_max_s <- 0.4
+
+# ------------------------------------------------------------
+# Sampling settings
+# ------------------------------------------------------------
+
+clicks_per_event <- 200
+sampling_seed <- 123
+
+# ------------------------------------------------------------
+# PCA settings
+# ------------------------------------------------------------
+
+fixed_n_pcs <- 5
+variance_cutoffs <- c(0.90, 0.95)
+
+# ------------------------------------------------------------
+# UMAP settings
+# ------------------------------------------------------------
+
+umap_neighbors <- 30
+umap_min_dist <- 0.1
+umap_metric <- "euclidean"
+umap_seed <- 123
+
+# ------------------------------------------------------------
+# HDBSCAN settings
+# ------------------------------------------------------------
+
+hdbscan_minPts <- 30
+
+# ------------------------------------------------------------
+# Concatenated spectrogram settings
+# ------------------------------------------------------------
+
+max_clicks_per_cluster_spectrogram <- 300
+cluster_spectrogram_seed <- 456
+
+cat("Output directory:\n")
+cat(output_dir, "\n")
+
+```
+
+## Load Combined Tukey and ICI Tables
+
+```{r}
+
+# ------------------------------------------------------------
+# Load corrected combined Tukey object
+# ------------------------------------------------------------
+
+combined_tukey <- readRDS(combined_file)
+
+cat("Loaded combined_tukey object.\n")
+cat("Number of events:", length(combined_tukey), "\n\n")
+
+# ------------------------------------------------------------
+# Load click-level ICI table
+# ------------------------------------------------------------
+
+click_metadata_with_ici <- readRDS(ici_file)
+
+cat("Loaded click_metadata_with_ici object.\n")
+cat("Rows in ICI table:", nrow(click_metadata_with_ici), "\n\n")
+
+# ------------------------------------------------------------
+# Preview structures
+# ------------------------------------------------------------
+
+cat("Class of combined_tukey:\n")
+print(class(combined_tukey))
+
+cat("\nClass of first event object:\n")
+print(class(combined_tukey[[1]]))
+
+cat("\nNames in first event object:\n")
+print(names(combined_tukey[[1]]))
+
+cat("\nColumns in click_metadata_with_ici:\n")
+print(names(click_metadata_with_ici))
+
+```
+
+## Sanity Checks for Combined Tukey Structure
+
+```{r}
+
+event_structure_summary <- data.frame(
+  
+  EventIndex = seq_along(combined_tukey),
+  
+  EventID = sapply(combined_tukey, function(x) x$EventID),
+  
+  n_freq = sapply(combined_tukey, function(x) length(x$freq)),
+  
+  n_uid = sapply(combined_tukey, function(x) length(x$UID)),
+  
+  allSpec_rows = sapply(combined_tukey, function(x) dim(x$allSpec)[1]),
+  
+  allSpec_cols = sapply(combined_tukey, function(x) dim(x$allSpec)[2]),
+  
+  stringsAsFactors = FALSE
+)
+
+print(event_structure_summary)
+
+# ------------------------------------------------------------
+# Total click count
+# ------------------------------------------------------------
+
+total_clicks <- sum(event_structure_summary$allSpec_cols)
+
+cat("\nTotal clicks across all events:", total_clicks, "\n")
+
+# ------------------------------------------------------------
+# Core dimension checks
+# ------------------------------------------------------------
+
+uid_matches_allSpec <- all(
+  event_structure_summary$n_uid ==
+    event_structure_summary$allSpec_cols
+)
+
+freq_matches_allSpec <- all(
+  event_structure_summary$n_freq ==
+    event_structure_summary$allSpec_rows
+)
+
+cat("\nUID count matches allSpec columns:\n")
+print(uid_matches_allSpec)
+
+cat("\nFrequency count matches allSpec rows:\n")
+print(freq_matches_allSpec)
+
+if (uid_matches_allSpec && freq_matches_allSpec) {
+  
+  cat("\nPASS: Core spectral dimensions are aligned.\n")
+  
+} else {
+  
+  stop("FAIL: Spectral dimensions are misaligned.")
+}
+
+```
+
+## Check for Duplicated EventIDs and UID Problems
+
+```{r}
+
+# ------------------------------------------------------------
+# Build click-level metadata from Tukey object
+# ------------------------------------------------------------
+
+click_metadata_from_tukey <- list()
+
+for (i in seq_along(combined_tukey)) {
+  
+  event_obj <- combined_tukey[[i]]
+  
+  n_clicks <- ncol(event_obj$allSpec)
+  
+  click_metadata_from_tukey[[i]] <- data.frame(
+    
+    EventIndex = i,
+    
+    EventID = event_obj$EventID,
+    
+    UID = as.character(event_obj$UID),
+    
+    ClickIndexWithinEvent = seq_len(n_clicks),
+    
+    stringsAsFactors = FALSE
+  )
+}
+
+click_metadata_from_tukey <- bind_rows(click_metadata_from_tukey)
+
+cat("Rows in Tukey click metadata:",
+    nrow(click_metadata_from_tukey), "\n")
+
+# ------------------------------------------------------------
+# Duplicate EventID check
+# ------------------------------------------------------------
+
+duplicate_event_ids <- click_metadata_from_tukey %>%
+  distinct(EventIndex, EventID) %>%
+  count(EventID, name = "n_rows") %>%
+  filter(n_rows > 1)
+
+cat("\nDuplicated EventIDs:\n")
+print(duplicate_event_ids)
+
+# ------------------------------------------------------------
+# Duplicate UID within EventID
+# ------------------------------------------------------------
+
+duplicate_uid_within_event <- click_metadata_from_tukey %>%
+  count(EventID, UID, name = "n_rows") %>%
+  filter(n_rows > 1)
+
+cat("\nDuplicated UID values within EventID:\n")
+print(duplicate_uid_within_event)
+
+# ------------------------------------------------------------
+# PASS / FAIL checks
+# ------------------------------------------------------------
+
+if (nrow(duplicate_event_ids) == 0) {
+  
+  cat("\nPASS: No duplicated EventIDs.\n")
+  
+} else {
+  
+  stop("FAIL: Duplicated EventIDs detected.")
+}
+
+if (nrow(duplicate_uid_within_event) == 0) {
+  
+  cat("\nPASS: No duplicated UID values within events.\n")
+  
+} else {
+  
+  stop("FAIL: Duplicated UID values detected within events.")
+}
+
+```
+
+## Inspect Frequency Grids Before Interpolation
+
+```{r}
+
+freq_grid_summary <- data.frame(
+  EventIndex = seq_along(combined_tukey),
+  EventID = sapply(combined_tukey, function(x) x$EventID),
+  n_freq = sapply(combined_tukey, function(x) length(x$freq)),
+  min_freq = sapply(combined_tukey, function(x) min(x$freq, na.rm = TRUE)),
+  max_freq = sapply(combined_tukey, function(x) max(x$freq, na.rm = TRUE)),
+  median_freq_step = sapply(combined_tukey, function(x) median(diff(x$freq), na.rm = TRUE)),
+  stringsAsFactors = FALSE
+)
+
+print(freq_grid_summary)
+
+write.csv(
+  freq_grid_summary,
+  file = file.path(table_dir, "frequency_grid_summary_before_interpolation.csv"),
+  row.names = FALSE
+)
+
+# Check whether all frequency grids are already identical
+reference_freq_original <- combined_tukey[[1]]$freq
+
+all_freq_grids_identical <- all(
+  sapply(
+    combined_tukey,
+    function(x) identical(x$freq, reference_freq_original)
+  )
+)
+
+cat("\nAre all original frequency grids identical?\n")
+print(all_freq_grids_identical)
+
+```
+
+## Interpolate All Events to Shared Frequency Grid
+
+```{r}
+
+# ------------------------------------------------------------
+# Use first event frequency grid as reference
+# ------------------------------------------------------------
+
+reference_freq <- combined_tukey[[1]]$freq
+
+cat("Reference grid length:", length(reference_freq), "\n")
+cat("Reference min frequency:", min(reference_freq), "\n")
+cat("Reference max frequency:", max(reference_freq), "\n")
+cat("Reference median step:", median(diff(reference_freq)), "\n")
+
+# ------------------------------------------------------------
+# Helper function: interpolate one matrix to reference grid
+# ------------------------------------------------------------
+
+interpolate_spectra_matrix <- function(original_freq, spectra_matrix, reference_freq) {
+  
+  interpolated_matrix <- apply(
+    spectra_matrix,
+    2,
+    function(one_spectrum) {
+      approx(
+        x = original_freq,
+        y = one_spectrum,
+        xout = reference_freq,
+        method = "linear",
+        rule = 2
+      )$y
+    }
+  )
+  
+  return(interpolated_matrix)
+}
+
+# ------------------------------------------------------------
+# Interpolate each event
+# ------------------------------------------------------------
+
+interpolated_tukey <- vector("list", length(combined_tukey))
+
+for (i in seq_along(combined_tukey)) {
+  
+  event_obj <- combined_tukey[[i]]
+  
+  cat("\nInterpolating event", i, "of", length(combined_tukey), ":",
+      event_obj$EventID, "\n")
+  
+  interpolated_allSpec <- interpolate_spectra_matrix(
+    original_freq = event_obj$freq,
+    spectra_matrix = event_obj$allSpec,
+    reference_freq = reference_freq
+  )
+  
+  interpolated_tukey[[i]] <- event_obj
+  interpolated_tukey[[i]]$freq <- reference_freq
+  interpolated_tukey[[i]]$allSpec <- interpolated_allSpec
+}
+
+# ------------------------------------------------------------
+# Sanity check: all interpolated grids identical
+# ------------------------------------------------------------
+
+all_interpolated_grids_identical <- all(
+  sapply(
+    interpolated_tukey,
+    function(x) identical(x$freq, reference_freq)
+  )
+)
+
+cat("\nAre all interpolated frequency grids identical?\n")
+print(all_interpolated_grids_identical)
+
+if (all_interpolated_grids_identical) {
+  cat("\nPASS: All events now share the same frequency grid.\n")
+} else {
+  stop("FAIL: Frequency-grid interpolation did not align all events.")
+}
+
+```
+
+## Restrict Spectra to 19-50 kHz
+
+```{r}
+
+# ------------------------------------------------------------
+# Convert reference frequency grid to kHz if needed
+# ------------------------------------------------------------
+
+if (max(reference_freq, na.rm = TRUE) > 1000) {
+  reference_freq_khz <- reference_freq / 1000
+  cat("Detected frequency grid in Hz. Converted to kHz.\n")
+} else {
+  reference_freq_khz <- reference_freq
+  cat("Detected frequency grid already in kHz.\n")
+}
+
+# ------------------------------------------------------------
+# Identify frequency bins inside target range
+# ------------------------------------------------------------
+
+freq_keep <- reference_freq_khz >= freq_min_khz & reference_freq_khz <= freq_max_khz
+
+freq_focus <- reference_freq_khz[freq_keep]
+
+cat("Frequency range requested:", freq_min_khz, "to", freq_max_khz, "kHz\n")
+cat("Number of frequency bins retained:", length(freq_focus), "\n")
+
+if (length(freq_focus) > 0) {
+  cat("Actual minimum retained frequency:", min(freq_focus), "kHz\n")
+  cat("Actual maximum retained frequency:", max(freq_focus), "kHz\n")
+}
+
+if (length(freq_focus) < 2) {
+  stop("Too few frequency bins retained. Check frequency units and freq_min_khz/freq_max_khz.")
+}
+
+# ------------------------------------------------------------
+# Save retained frequency grid
+# ------------------------------------------------------------
+
+freq_focus_table <- data.frame(
+  FreqBin = seq_along(freq_focus),
+  Frequency_kHz = freq_focus,
+  Frequency_OriginalUnits = reference_freq[freq_keep]
+)
+
+write.csv(
+  freq_focus_table,
+  file = file.path(table_dir, "frequency_grid_19_50_khz.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Build Click-By-Frequency Spectral Matrix
+
+```{r}
+
+# ------------------------------------------------------------
+# Build one click-level spectral matrix and matching metadata table
+# ------------------------------------------------------------
+
+spectra_list <- vector("list", length(interpolated_tukey))
+metadata_list <- vector("list", length(interpolated_tukey))
+
+for (i in seq_along(interpolated_tukey)) {
+  
+  event_obj <- interpolated_tukey[[i]]
+  
+  # allSpec is frequency x click
+  # First restrict to 19–50 kHz frequency bins, then transpose:
+  # rows = clicks, columns = frequency bins
+  spectra_focus_event <- t(event_obj$allSpec[freq_keep, , drop = FALSE])
+  
+  spectra_list[[i]] <- spectra_focus_event
+  
+  metadata_list[[i]] <- data.frame(
+    EventIndex = i,
+    EventID = event_obj$EventID,
+    DriftID = sub("_Event_.*$", "", event_obj$EventID),
+    UID = as.character(event_obj$UID),
+    ClickIndexWithinEvent = seq_len(ncol(event_obj$allSpec)),
+    stringsAsFactors = FALSE
+  )
+}
+
+# ------------------------------------------------------------
+# Combine all events into one matrix/table
+# ------------------------------------------------------------
+
+spectra_matrix <- do.call(rbind, spectra_list)
+spectra_metadata <- bind_rows(metadata_list)
+
+# Use kHz labels from corrected Chunk 9
+colnames(spectra_matrix) <- paste0(
+  "freq_",
+  sprintf("%.3f", freq_focus),
+  "_kHz"
+)
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("Rows in spectra matrix:", nrow(spectra_matrix), "\n")
+cat("Columns in spectra matrix:", ncol(spectra_matrix), "\n")
+cat("Rows in spectra metadata:", nrow(spectra_metadata), "\n")
+
+if (nrow(spectra_matrix) != nrow(spectra_metadata)) {
+  stop("FAIL: Spectra matrix rows do not match metadata rows.")
+} else {
+  cat("\nPASS: Spectra matrix and metadata rows are aligned.\n")
+}
+
+if (ncol(spectra_matrix) != length(freq_focus)) {
+  stop("FAIL: Spectra matrix columns do not match retained frequency bins.")
+} else {
+  cat("PASS: Spectra matrix columns match retained frequency bins.\n")
+}
+
+cat("\nPreview spectra metadata:\n")
+print(head(spectra_metadata))
+
+cat("\nSpectra matrix dimensions:\n")
+print(dim(spectra_matrix))
+
+```
+
+## Sanity Check Spectra Values
+
+```{r}
+
+
+# ------------------------------------------------------------
+# Basic matrix checks
+# ------------------------------------------------------------
+
+cat("Spectra matrix dimensions:\n")
+print(dim(spectra_matrix))
+
+cat("\nNumber of NA values in spectra matrix:\n")
+print(sum(is.na(spectra_matrix)))
+
+cat("\nNumber of infinite / non-finite values in spectra matrix:\n")
+print(sum(!is.finite(spectra_matrix)))
+
+if (sum(is.na(spectra_matrix)) > 0 || sum(!is.finite(spectra_matrix)) > 0) {
+  stop("FAIL: Spectra matrix contains NA, NaN, or infinite values.")
+}
+
+# ------------------------------------------------------------
+# Check per-click min/max values
+# ------------------------------------------------------------
+
+spectra_row_min <- apply(spectra_matrix, 1, min, na.rm = TRUE)
+spectra_row_max <- apply(spectra_matrix, 1, max, na.rm = TRUE)
+spectra_row_range <- spectra_row_max - spectra_row_min
+
+cat("\nSummary of per-click minimum values:\n")
+print(summary(spectra_row_min))
+
+cat("\nSummary of per-click maximum values:\n")
+print(summary(spectra_row_max))
+
+cat("\nSummary of per-click spectral ranges:\n")
+print(summary(spectra_row_range))
+
+# ------------------------------------------------------------
+# Flag flat spectra, if any
+# ------------------------------------------------------------
+
+flat_spectra_rows <- which(spectra_row_range == 0)
+
+cat("\nNumber of flat spectra rows:", length(flat_spectra_rows), "\n")
+
+if (length(flat_spectra_rows) > 0) {
+  
+  cat("\nWARNING: Some spectra have zero range across retained frequencies.\n")
+  cat("These may cause issues later if additional scaling is applied.\n")
+  
+  flat_spectra_table <- spectra_metadata[flat_spectra_rows, ]
+  
+  write.csv(
+    flat_spectra_table,
+    file = file.path(table_dir, "flat_spectra_rows_19_50_khz.csv"),
+    row.names = FALSE
+  )
+}
+
+# ------------------------------------------------------------
+# Save row-level min/max diagnostics
+# ------------------------------------------------------------
+
+spectra_row_diagnostics <- spectra_metadata %>%
+  mutate(
+    row_min_19_50_khz = spectra_row_min,
+    row_max_19_50_khz = spectra_row_max,
+    row_range_19_50_khz = spectra_row_range
+  )
+
+write.csv(
+  spectra_row_diagnostics,
+  file = file.path(table_dir, "spectra_row_min_max_diagnostics_19_50_khz.csv"),
+  row.names = FALSE
+)
+
+cat("\nPASS: Spectra matrix contains finite values only.\n")
+
+```
+
+## Min-Max Normalize Spectra Across 19-50 kHz
+
+```{r}
+
+# ------------------------------------------------------------
+# Min-max normalize each click spectrum across 19–50 kHz
+#
+# rows = clicks
+# columns = frequency bins
+#
+# Formula:
+# normalized = (value - row_min) / (row_max - row_min)
+# ------------------------------------------------------------
+
+spectra_row_min <- apply(spectra_matrix, 1, min, na.rm = TRUE)
+spectra_row_max <- apply(spectra_matrix, 1, max, na.rm = TRUE)
+spectra_row_range <- spectra_row_max - spectra_row_min
+
+if (any(spectra_row_range == 0)) {
+  stop("Some spectra have zero range and cannot be min-max normalized.")
+}
+
+spectra_matrix_minmax <- sweep(
+  spectra_matrix,
+  1,
+  spectra_row_min,
+  FUN = "-"
+)
+
+spectra_matrix_minmax <- sweep(
+  spectra_matrix_minmax,
+  1,
+  spectra_row_range,
+  FUN = "/"
+)
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+minmax_row_min <- apply(spectra_matrix_minmax, 1, min, na.rm = TRUE)
+minmax_row_max <- apply(spectra_matrix_minmax, 1, max, na.rm = TRUE)
+
+cat("Min-max normalized spectra dimensions:\n")
+print(dim(spectra_matrix_minmax))
+
+cat("\nSummary of normalized per-click minimum values:\n")
+print(summary(minmax_row_min))
+
+cat("\nSummary of normalized per-click maximum values:\n")
+print(summary(minmax_row_max))
+
+cat("\nNumber of NA values in normalized spectra:\n")
+print(sum(is.na(spectra_matrix_minmax)))
+
+cat("\nNumber of non-finite values in normalized spectra:\n")
+print(sum(!is.finite(spectra_matrix_minmax)))
+
+if (sum(is.na(spectra_matrix_minmax)) > 0 || sum(!is.finite(spectra_matrix_minmax)) > 0) {
+  stop("FAIL: Min-max normalized spectra contain NA, NaN, or infinite values.")
+}
+
+cat("\nPASS: Spectra are now min-max normalized across 19–50 kHz.\n")
+
+# ------------------------------------------------------------
+# Save diagnostics
+# ------------------------------------------------------------
+
+minmax_diagnostics <- spectra_metadata %>%
+  mutate(
+    raw_min_19_50_khz = spectra_row_min,
+    raw_max_19_50_khz = spectra_row_max,
+    raw_range_19_50_khz = spectra_row_range,
+    minmax_min_19_50_khz = minmax_row_min,
+    minmax_max_19_50_khz = minmax_row_max
+  )
+
+write.csv(
+  minmax_diagnostics,
+  file = file.path(table_dir, "minmax_normalization_diagnostics_19_50_khz.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Join ICI to Spectra Metadata
+
+```{r}
+
+# ------------------------------------------------------------
+# Prepare ICI table for joining
+# ------------------------------------------------------------
+
+ici_for_join <- click_metadata_with_ici %>%
+  mutate(
+    UID = as.character(UID)
+  ) %>%
+  select(
+    EventID,
+    UID,
+    DriftID,
+    Final_UTC_clean,
+    Final_UTC_ms,
+    ICI_to_next_ms,
+    ICI_to_next_flag,
+    ICI_from_previous_ms,
+    ICI_from_previous_flag,
+    IsFirstClickInEvent,
+    IsLastClickInEvent
+  )
+
+# ------------------------------------------------------------
+# Check ICI table uniqueness before join
+# ------------------------------------------------------------
+
+ici_duplicate_check <- ici_for_join %>%
+  count(EventID, UID, name = "n_rows") %>%
+  filter(n_rows > 1)
+
+cat("Duplicated EventID + UID rows in ICI table:\n")
+print(ici_duplicate_check)
+
+if (nrow(ici_duplicate_check) > 0) {
+  stop("FAIL: ICI table has duplicated EventID + UID rows.")
+}
+
+# ------------------------------------------------------------
+# Join ICI table to spectra metadata
+# ------------------------------------------------------------
+
+spectra_metadata_with_ici <- spectra_metadata %>%
+  left_join(
+    ici_for_join,
+    by = c("EventID", "UID"),
+    suffix = c("_spectra", "_ici")
+  )
+
+cat("Rows before join:", nrow(spectra_metadata), "\n")
+cat("Rows after join:", nrow(spectra_metadata_with_ici), "\n")
+
+if (nrow(spectra_metadata_with_ici) != nrow(spectra_metadata)) {
+  stop("FAIL: ICI join changed the number of rows.")
+}
+
+# ------------------------------------------------------------
+# Create ICI in seconds
+# ------------------------------------------------------------
+
+spectra_metadata_with_ici <- spectra_metadata_with_ici %>%
+  mutate(
+    ICI_to_next_s = ICI_to_next_ms / 1000,
+    log10_ICI_to_next_s = log10(ICI_to_next_s)
+  )
+
+# ------------------------------------------------------------
+# Join coverage checks
+# ------------------------------------------------------------
+
+cat("\nRows missing ICI_to_next_ms:\n")
+print(sum(is.na(spectra_metadata_with_ici$ICI_to_next_ms)))
+
+cat("\nICI_to_next_flag counts:\n")
+print(table(spectra_metadata_with_ici$ICI_to_next_flag, useNA = "ifany"))
+
+cat("\nSummary of ICI_to_next_s:\n")
+print(summary(spectra_metadata_with_ici$ICI_to_next_s))
+
+# ------------------------------------------------------------
+# Save joined metadata
+# ------------------------------------------------------------
+
+saveRDS(
+  spectra_metadata_with_ici,
+  file = file.path(data_dir, "spectra_metadata_with_ici.rds")
+)
+
+write.csv(
+  spectra_metadata_with_ici,
+  file = file.path(table_dir, "spectra_metadata_with_ici.csv"),
+  row.names = FALSE
+)
+
+cat("\nPASS: ICI metadata joined to spectra metadata.\n")
+
+```
+
+## Inspect ICI Filtering Effect
+
+```{r}
+
+# ------------------------------------------------------------
+# Label clicks by ICI filter category
+# ------------------------------------------------------------
+
+spectra_metadata_with_ici <- spectra_metadata_with_ici %>%
+  mutate(
+    ICI_filter_category = case_when(
+      is.na(ICI_to_next_s) ~ "missing_ici",
+      ICI_to_next_s == 0 ~ "zero_ici",
+      ICI_to_next_s < ici_min_s ~ "below_0.01_s_likely_buzz",
+      ICI_to_next_s >= ici_min_s & ICI_to_next_s <= ici_max_s ~ "kept_0.01_to_0.4_s",
+      ICI_to_next_s > ici_max_s ~ "above_0.4_s_long_gap",
+      TRUE ~ "other"
+    )
+  )
+
+# ------------------------------------------------------------
+# Overall filter summary
+# ------------------------------------------------------------
+
+ici_filter_summary <- spectra_metadata_with_ici %>%
+  count(ICI_filter_category, name = "n_clicks") %>%
+  mutate(
+    percent_clicks = 100 * n_clicks / sum(n_clicks)
+  ) %>%
+  arrange(desc(n_clicks))
+
+cat("Overall ICI filter summary:\n")
+print(ici_filter_summary)
+
+write.csv(
+  ici_filter_summary,
+  file = file.path(table_dir, "ici_filter_summary_overall.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Filter summary by event
+# ------------------------------------------------------------
+
+ici_filter_summary_by_event <- spectra_metadata_with_ici %>%
+  group_by(DriftID_spectra, EventID, ICI_filter_category) %>%
+  summarise(
+    n_clicks = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(DriftID_spectra, EventID) %>%
+  mutate(
+    percent_within_event = 100 * n_clicks / sum(n_clicks)
+  ) %>%
+  ungroup() %>%
+  arrange(DriftID_spectra, EventID, ICI_filter_category)
+
+cat("\nICI filter summary by event:\n")
+print(ici_filter_summary_by_event)
+
+write.csv(
+  ici_filter_summary_by_event,
+  file = file.path(table_dir, "ici_filter_summary_by_event.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Kept-click summary by event
+# ------------------------------------------------------------
+
+kept_summary_by_event <- spectra_metadata_with_ici %>%
+  group_by(DriftID_spectra, EventID) %>%
+  summarise(
+    n_total_clicks = n(),
+    n_kept_0.01_to_0.4_s = sum(ICI_filter_category == "kept_0.01_to_0.4_s"),
+    percent_kept = 100 * n_kept_0.01_to_0.4_s / n_total_clicks,
+    .groups = "drop"
+  ) %>%
+  arrange(DriftID_spectra, EventID)
+
+cat("\nKept-click summary by event:\n")
+print(kept_summary_by_event)
+
+write.csv(
+  kept_summary_by_event,
+  file = file.path(table_dir, "kept_click_summary_by_event.csv"),
+  row.names = FALSE
+)
+
+```
+
+## Filter to 0.01-0.4 s and Sample Up To 200 Clicks Per Event
+
+```{r}
+
+set.seed(sampling_seed)
+
+# ------------------------------------------------------------
+# Keep only clicks inside target ICI range
+# ------------------------------------------------------------
+
+eligible_clicks <- spectra_metadata_with_ici %>%
+  mutate(
+    RowID = row_number()
+  ) %>%
+  filter(
+    ICI_filter_category == "kept_0.01_to_0.4_s"
+  )
+
+cat("Eligible clicks after ICI filtering:", nrow(eligible_clicks), "\n")
+
+# ------------------------------------------------------------
+# Sample up to 200 clicks per event
+# ------------------------------------------------------------
+
+sampled_clicks <- eligible_clicks %>%
+  group_by(EventID) %>%
+  slice_sample(
+    n = clicks_per_event,
+    replace = FALSE
+  ) %>%
+  ungroup()
+
+cat("Sampled clicks:", nrow(sampled_clicks), "\n")
+cat("Number of events represented:", n_distinct(sampled_clicks$EventID), "\n")
+
+# ------------------------------------------------------------
+# Build sampled spectra matrix
+# ------------------------------------------------------------
+
+sampled_row_ids <- sampled_clicks$RowID
+
+spectra_matrix_sampled_minmax <- spectra_matrix_minmax[
+  sampled_row_ids,
+  ,
+  drop = FALSE
+]
+
+cat("Sampled spectra matrix dimensions:\n")
+print(dim(spectra_matrix_sampled_minmax))
+
+if (nrow(spectra_matrix_sampled_minmax) != nrow(sampled_clicks)) {
+  stop("FAIL: Sampled spectra matrix rows do not match sampled metadata rows.")
+}
+
+# ------------------------------------------------------------
+# Summarize sampled clicks by event
+# ------------------------------------------------------------
+
+sample_summary_by_event <- sampled_clicks %>%
+  count(DriftID_spectra, EventID, name = "n_sampled_clicks") %>%
+  arrange(DriftID_spectra, EventID)
+
+cat("\nSampled clicks by event:\n")
+print(sample_summary_by_event, n = Inf)
+
+write.csv(
+  sample_summary_by_event,
+  file = file.path(table_dir, "sampled_clicks_by_event.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Save sampled metadata and spectra
+# ------------------------------------------------------------
+
+saveRDS(
+  sampled_clicks,
+  file = file.path(data_dir, "sampled_click_metadata_ici_filtered.rds")
+)
+
+saveRDS(
+  spectra_matrix_sampled_minmax,
+  file = file.path(data_dir, "sampled_minmax_spectra_matrix_19_50_khz.rds")
+)
+
+cat("\nPASS: ICI filtering and post-filter sampling complete.\n")
+
+```
+
+## Run PCA on Sampled Min-Max Spectra
+
+```{r}
+
+# ------------------------------------------------------------
+# PCA on min-max normalized spectra only
+#
+# rows = sampled clicks
+# columns = frequency bins from 19–50 kHz
+# ------------------------------------------------------------
+
+pca_spectra <- prcomp(
+  spectra_matrix_sampled_minmax,
+  center = TRUE,
+  scale. = FALSE
+)
+
+# ------------------------------------------------------------
+# Variance explained
+# ------------------------------------------------------------
+
+pca_variance <- pca_spectra$sdev^2
+pca_variance_explained <- pca_variance / sum(pca_variance)
+pca_cumulative_variance <- cumsum(pca_variance_explained)
+
+pca_variance_table <- data.frame(
+  PC = seq_along(pca_variance_explained),
+  PC_label = paste0("PC", seq_along(pca_variance_explained)),
+  variance_explained = pca_variance_explained,
+  cumulative_variance_explained = pca_cumulative_variance
+)
+
+cat("PCA complete.\n")
+cat("Number of PCs:", ncol(pca_spectra$x), "\n\n")
+
+cat("First 10 PCs variance explained:\n")
+print(head(pca_variance_table, 10))
+
+# ------------------------------------------------------------
+# PCs needed for variance cutoffs
+# ------------------------------------------------------------
+
+n_pcs_90 <- which(pca_cumulative_variance >= 0.90)[1]
+n_pcs_95 <- which(pca_cumulative_variance >= 0.95)[1]
+
+cat("\nNumber of PCs needed for 90% variance:", n_pcs_90, "\n")
+cat("Number of PCs needed for 95% variance:", n_pcs_95, "\n")
+cat("Fixed PC option:", fixed_n_pcs, "\n")
+
+# ------------------------------------------------------------
+# Save PCA objects and variance table
+# ------------------------------------------------------------
+
+saveRDS(
+  pca_spectra,
+  file = file.path(data_dir, "pca_spectra_sampled_minmax_19_50_khz.rds")
+)
+
+write.csv(
+  pca_variance_table,
+  file = file.path(table_dir, "pca_variance_explained.csv"),
+  row.names = FALSE
+)
+
+cat("\nPASS: PCA completed and saved.\n")
+
+```
+
+## Plot PCA Variance Explained
+
+```{r}
+
+# ------------------------------------------------------------
+# Scree plot: variance explained by each PC
+# ------------------------------------------------------------
+
+p_scree <- ggplot(
+  pca_variance_table,
+  aes(x = PC, y = variance_explained)
+) +
+  geom_col() +
+  geom_vline(xintercept = fixed_n_pcs, linetype = "dashed") +
+  geom_vline(xintercept = n_pcs_90, linetype = "dotted") +
+  geom_vline(xintercept = n_pcs_95, linetype = "dotdash") +
+  labs(
+    title = "PCA Scree Plot",
+    subtitle = paste0(
+      "Dashed = 5 PCs; dotted = 90% variance (",
+      n_pcs_90,
+      " PCs); dot-dash = 95% variance (",
+      n_pcs_95,
+      " PCs)"
+    ),
+    x = "Principal Component",
+    y = "Proportion of variance explained"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_scree)
+
+ggsave(
+  filename = file.path(plot_dir, "pca_scree_plot.png"),
+  plot = p_scree,
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# Cumulative variance plot
+# ------------------------------------------------------------
+
+p_cumulative <- ggplot(
+  pca_variance_table,
+  aes(x = PC, y = cumulative_variance_explained)
+) +
+  geom_line() +
+  geom_point(size = 1) +
+  geom_hline(yintercept = 0.90, linetype = "dotted") +
+  geom_hline(yintercept = 0.95, linetype = "dotdash") +
+  geom_vline(xintercept = fixed_n_pcs, linetype = "dashed") +
+  geom_vline(xintercept = n_pcs_90, linetype = "dotted") +
+  geom_vline(xintercept = n_pcs_95, linetype = "dotdash") +
+  labs(
+    title = "PCA Cumulative Variance Explained",
+    subtitle = paste0(
+      "5 PCs vs. PCs needed for 90% and 95% total spectral variance"
+    ),
+    x = "Number of principal components",
+    y = "Cumulative variance explained"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_cumulative)
+
+ggsave(
+  filename = file.path(plot_dir, "pca_cumulative_variance_plot.png"),
+  plot = p_cumulative,
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+
+cat("Saved PCA variance plots to:\n")
+cat(plot_dir, "\n")
+
+```
+
+## Build PC + Scaled logICI Feature Matrices
+
+```{r}
+
+# ------------------------------------------------------------
+# Add PCA scores to sampled click metadata
+# ------------------------------------------------------------
+
+pc_scores <- as.data.frame(pca_spectra$x)
+
+sampled_clicks_with_pcs <- bind_cols(
+  sampled_clicks,
+  pc_scores
+)
+
+# ------------------------------------------------------------
+# Prepare log-transformed and scaled ICI
+# ------------------------------------------------------------
+
+sampled_clicks_with_pcs <- sampled_clicks_with_pcs %>%
+  mutate(
+    log10_ICI_to_next_s = log10(ICI_to_next_s),
+    scaled_log10_ICI = as.numeric(scale(log10_ICI_to_next_s))
+  )
+
+cat("Summary of raw ICI seconds:\n")
+print(summary(sampled_clicks_with_pcs$ICI_to_next_s))
+
+cat("\nSummary of log10 ICI seconds:\n")
+print(summary(sampled_clicks_with_pcs$log10_ICI_to_next_s))
+
+cat("\nSummary of scaled log10 ICI:\n")
+print(summary(sampled_clicks_with_pcs$scaled_log10_ICI))
+
+# ------------------------------------------------------------
+# Define PC sets
+# ------------------------------------------------------------
+
+pc_set_5 <- paste0("PC", 1:fixed_n_pcs)
+pc_set_90 <- paste0("PC", 1:n_pcs_90)
+pc_set_95 <- paste0("PC", 1:n_pcs_95)
+
+# ------------------------------------------------------------
+# Build feature matrices
+# ------------------------------------------------------------
+
+feature_matrix_5pc_ici <- sampled_clicks_with_pcs %>%
+  select(all_of(pc_set_5), scaled_log10_ICI) %>%
+  as.matrix()
+
+feature_matrix_90pc_ici <- sampled_clicks_with_pcs %>%
+  select(all_of(pc_set_90), scaled_log10_ICI) %>%
+  as.matrix()
+
+feature_matrix_95pc_ici <- sampled_clicks_with_pcs %>%
+  select(all_of(pc_set_95), scaled_log10_ICI) %>%
+  as.matrix()
+
+feature_matrix_5pc_spectra_only <- sampled_clicks_with_pcs %>%
+  select(all_of(pc_set_5)) %>%
+  as.matrix()
+
+feature_matrix_90pc_spectra_only <- sampled_clicks_with_pcs %>%
+  select(all_of(pc_set_90)) %>%
+  as.matrix()
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("\nFeature matrix dimensions:\n")
+cat("5 PCs + ICI:", dim(feature_matrix_5pc_ici), "\n")
+cat("90% PCs + ICI:", dim(feature_matrix_90pc_ici), "\n")
+cat("95% PCs + ICI:", dim(feature_matrix_95pc_ici), "\n")
+cat("5 PCs only:", dim(feature_matrix_5pc_spectra_only), "\n")
+cat("90% PCs only:", dim(feature_matrix_90pc_spectra_only), "\n")
+
+if (any(!is.finite(feature_matrix_5pc_ici))) {
+  stop("FAIL: 5 PC + ICI matrix contains non-finite values.")
+}
+
+if (any(!is.finite(feature_matrix_90pc_ici))) {
+  stop("FAIL: 90 PC + ICI matrix contains non-finite values.")
+}
+
+if (any(!is.finite(feature_matrix_95pc_ici))) {
+  stop("FAIL: 95 PC + ICI matrix contains non-finite values.")
+}
+
+# ------------------------------------------------------------
+# Save feature metadata and matrices
+# ------------------------------------------------------------
+
+saveRDS(
+  sampled_clicks_with_pcs,
+  file = file.path(data_dir, "sampled_clicks_with_pcs_and_scaled_logici.rds")
+)
+
+saveRDS(
+  feature_matrix_5pc_ici,
+  file = file.path(data_dir, "feature_matrix_5pc_plus_scaled_logici.rds")
+)
+
+saveRDS(
+  feature_matrix_90pc_ici,
+  file = file.path(data_dir, "feature_matrix_90pc_plus_scaled_logici.rds")
+)
+
+saveRDS(
+  feature_matrix_95pc_ici,
+  file = file.path(data_dir, "feature_matrix_95pc_plus_scaled_logici.rds")
+)
+
+cat("\nPASS: PC + scaled logICI feature matrices created.\n")
+
+```
+
+## Run UMAP on Spectra-Only and Spectra + Scaled logICI Features Matrices
+
+```{r}
+
+set.seed(umap_seed)
+
+# ------------------------------------------------------------
+# Helper function to run UMAP cleanly
+# ------------------------------------------------------------
+
+run_umap_analysis <- function(feature_matrix, analysis_name) {
+  
+  cat("\n============================\n")
+  cat("Running UMAP:", analysis_name, "\n")
+  cat("============================\n")
+  
+  umap_result <- uwot::umap(
+    feature_matrix,
+    n_neighbors = umap_neighbors,
+    min_dist = umap_min_dist,
+    metric = umap_metric,
+    n_components = 2,
+    ret_model = FALSE,
+    verbose = TRUE,
+    seed = umap_seed
+  )
+  
+  umap_df <- as.data.frame(umap_result)
+  names(umap_df) <- c("UMAP1", "UMAP2")
+  
+  umap_df$Analysis <- analysis_name
+  
+  return(umap_df)
+}
+
+# ------------------------------------------------------------
+# Main UMAP runs
+# ------------------------------------------------------------
+
+umap_5pc_spectra_only <- run_umap_analysis(
+  feature_matrix = feature_matrix_5pc_spectra_only,
+  analysis_name = "5PC_spectra_only"
+)
+
+umap_5pc_ici <- run_umap_analysis(
+  feature_matrix = feature_matrix_5pc_ici,
+  analysis_name = "5PC_plus_scaled_logICI"
+)
+
+umap_90pc_spectra_only <- run_umap_analysis(
+  feature_matrix = feature_matrix_90pc_spectra_only,
+  analysis_name = "90PC_spectra_only"
+)
+
+umap_90pc_ici <- run_umap_analysis(
+  feature_matrix = feature_matrix_90pc_ici,
+  analysis_name = "90PC_plus_scaled_logICI"
+)
+
+# ------------------------------------------------------------
+# Attach UMAP coordinates to metadata
+# ------------------------------------------------------------
+
+umap_results_all <- bind_rows(
+  bind_cols(sampled_clicks_with_pcs, umap_5pc_spectra_only),
+  bind_cols(sampled_clicks_with_pcs, umap_5pc_ici),
+  bind_cols(sampled_clicks_with_pcs, umap_90pc_spectra_only),
+  bind_cols(sampled_clicks_with_pcs, umap_90pc_ici)
+)
+
+cat("\nRows in combined UMAP results:", nrow(umap_results_all), "\n")
+cat("Expected rows:", nrow(sampled_clicks_with_pcs) * 4, "\n")
+
+# ------------------------------------------------------------
+# Save UMAP outputs
+# ------------------------------------------------------------
+
+saveRDS(
+  umap_results_all,
+  file = file.path(data_dir, "umap_results_all_main_comparisons.rds")
+)
+
+write.csv(
+  umap_results_all,
+  file = file.path(table_dir, "umap_results_all_main_comparisons.csv"),
+  row.names = FALSE
+)
+
+cat("\nPASS: UMAP runs complete and saved.\n")
+
+```
+
+## Plot UMAPs Colored by logICI
+
+```{r}
+
+# ------------------------------------------------------------
+# Plot helper
+# ------------------------------------------------------------
+
+plot_umap_logici <- function(df, analysis_name) {
+  
+  plot_data <- df %>%
+    filter(Analysis == analysis_name)
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = UMAP1,
+      y = UMAP2,
+      color = log10_ICI_to_next_s
+    )
+  ) +
+    geom_point(
+      size = 0.4,
+      alpha = 0.5
+    ) +
+    scale_color_viridis_c(
+      option = "plasma"
+    ) +
+    labs(
+      title = paste0("UMAP: ", analysis_name),
+      subtitle = "Colored by log10 ICI (seconds)",
+      x = "UMAP1",
+      y = "UMAP2",
+      color = "log10 ICI"
+    ) +
+    theme_bw(base_size = 13)
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Generate plots
+# ------------------------------------------------------------
+
+p_umap_5pc_only <- plot_umap_logici(
+  umap_results_all,
+  "5PC_spectra_only"
+)
+
+p_umap_5pc_ici <- plot_umap_logici(
+  umap_results_all,
+  "5PC_plus_scaled_logICI"
+)
+
+p_umap_90pc_only <- plot_umap_logici(
+  umap_results_all,
+  "90PC_spectra_only"
+)
+
+p_umap_90pc_ici <- plot_umap_logici(
+  umap_results_all,
+  "90PC_plus_scaled_logICI"
+)
+
+# ------------------------------------------------------------
+# Print plots
+# ------------------------------------------------------------
+
+print(p_umap_5pc_only)
+print(p_umap_5pc_ici)
+print(p_umap_90pc_only)
+print(p_umap_90pc_ici)
+
+# ------------------------------------------------------------
+# Save plots
+# ------------------------------------------------------------
+
+ggsave(
+  file.path(plot_dir, "umap_5pc_spectra_only_logici.png"),
+  p_umap_5pc_only,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+ggsave(
+  file.path(plot_dir, "umap_5pc_plus_logici.png"),
+  p_umap_5pc_ici,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+ggsave(
+  file.path(plot_dir, "umap_90pc_spectra_only_logici.png"),
+  p_umap_90pc_only,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+ggsave(
+  file.path(plot_dir, "umap_90pc_plus_logici.png"),
+  p_umap_90pc_ici,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+cat("Saved UMAP logICI plots to:\n")
+cat(plot_dir, "\n")
+
+```
+
+## Add Raw-Scaled ICI Comparison UMAPS
+
+```{r}
+
+# ------------------------------------------------------------
+# Build raw-scaled ICI feature matrices
+# ------------------------------------------------------------
+
+sampled_clicks_with_pcs <- sampled_clicks_with_pcs %>%
+  mutate(
+    scaled_raw_ICI = as.numeric(scale(ICI_to_next_s))
+  )
+
+feature_matrix_5pc_rawici <- sampled_clicks_with_pcs %>%
+  select(all_of(pc_set_5), scaled_raw_ICI) %>%
+  as.matrix()
+
+feature_matrix_90pc_rawici <- sampled_clicks_with_pcs %>%
+  select(all_of(pc_set_90), scaled_raw_ICI) %>%
+  as.matrix()
+
+cat("Summary of scaled raw ICI:\n")
+print(summary(sampled_clicks_with_pcs$scaled_raw_ICI))
+
+# ------------------------------------------------------------
+# Run UMAPs
+# ------------------------------------------------------------
+
+umap_5pc_rawici <- run_umap_analysis(
+  feature_matrix = feature_matrix_5pc_rawici,
+  analysis_name = "5PC_plus_scaled_rawICI"
+)
+
+umap_90pc_rawici <- run_umap_analysis(
+  feature_matrix = feature_matrix_90pc_rawici,
+  analysis_name = "90PC_plus_scaled_rawICI"
+)
+
+umap_rawici_results <- bind_rows(
+  bind_cols(sampled_clicks_with_pcs, umap_5pc_rawici),
+  bind_cols(sampled_clicks_with_pcs, umap_90pc_rawici)
+)
+
+saveRDS(
+  umap_rawici_results,
+  file = file.path(data_dir, "umap_results_rawici_comparison.rds")
+)
+
+cat("\nPASS: Raw-scaled ICI UMAP comparison complete.\n")
+
+```
+
+## Plot Raw-ICI UMAPs
+
+```{r}
+
+p_umap_5pc_rawici <- plot_umap_logici(
+  umap_rawici_results,
+  "5PC_plus_scaled_rawICI"
+)
+
+p_umap_90pc_rawici <- plot_umap_logici(
+  umap_rawici_results,
+  "90PC_plus_scaled_rawICI"
+)
+
+print(p_umap_5pc_rawici)
+print(p_umap_90pc_rawici)
+
+ggsave(
+  file.path(plot_dir, "umap_5pc_plus_scaled_rawici_colored_logici.png"),
+  p_umap_5pc_rawici,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+ggsave(
+  file.path(plot_dir, "umap_90pc_plus_scaled_rawici_colored_logici.png"),
+  p_umap_90pc_rawici,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+cat("Saved raw-ICI comparison UMAP plots.\n")
+
+```
+
+## Plot UMAPs by DriftID
+
+```{r}
+
+plot_umap_drift <- function(df, analysis_name) {
+  
+  plot_data <- df %>%
+    filter(Analysis == analysis_name)
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = UMAP1,
+      y = UMAP2,
+      color = DriftID_spectra
+    )
+  ) +
+    geom_point(size = 0.45, alpha = 0.65) +
+    labs(
+      title = paste0("UMAP: ", analysis_name),
+      subtitle = "Colored by DriftID",
+      x = "UMAP1",
+      y = "UMAP2",
+      color = "DriftID"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      legend.position = "right"
+    )
+  
+  return(p)
+}
+
+drift_umap_analyses <- c(
+  "5PC_spectra_only",
+  "5PC_plus_scaled_logICI",
+  "90PC_spectra_only",
+  "90PC_plus_scaled_logICI"
+)
+
+for (analysis_name in drift_umap_analyses) {
+  
+  p <- plot_umap_drift(umap_results_all, analysis_name)
+  
+  print(p)
+  
+  ggsave(
+    file.path(
+      plot_dir,
+      paste0("umap_", analysis_name, "_by_drift.png")
+    ),
+    p,
+    width = 8,
+    height = 6,
+    dpi = 300
+  )
+}
+
+```
+
+## Load Fixed k-means Cluster Assignments and Merge with UMAP
+
+```{r}
+
+# ------------------------------------------------------------
+# Choose which existing k-means result to compare against
+# ------------------------------------------------------------
+
+kmeans_k_to_compare <- 5
+
+cluster_base_dir <- "E:/Analysis/Clustering Output/MinMax_Normalized_ADRIFT003_Corrected/Min-Max Normalized"
+
+cluster_file <- file.path(
+  cluster_base_dir,
+  paste0("kmeans k_", kmeans_k_to_compare),
+  "data",
+  "cluster_assignments_full.csv"
+)
+
+if (!file.exists(cluster_file)) {
+  stop("Could not find k-means cluster file: ", cluster_file)
+}
+
+kmeans_assignments <- read.csv(cluster_file, stringsAsFactors = FALSE) %>%
+  mutate(
+    UID = as.character(UID),
+    kmeans_cluster = factor(cluster),
+    kmeans_k = kmeans_k_to_compare
+  ) %>%
+  select(EventID, UID, kmeans_cluster, kmeans_k)
+
+# ------------------------------------------------------------
+# Check uniqueness
+# ------------------------------------------------------------
+
+kmeans_duplicate_check <- kmeans_assignments %>%
+  count(EventID, UID, name = "n_rows") %>%
+  filter(n_rows > 1)
+
+if (nrow(kmeans_duplicate_check) > 0) {
+  stop("K-means assignments contain duplicated EventID + UID rows.")
+}
+
+# ------------------------------------------------------------
+# Merge with UMAP results
+# ------------------------------------------------------------
+
+umap_results_with_kmeans <- umap_results_all %>%
+  mutate(UID = as.character(UID)) %>%
+  left_join(
+    kmeans_assignments,
+    by = c("EventID", "UID")
+  )
+
+cat("Rows in UMAP results:", nrow(umap_results_all), "\n")
+cat("Rows after k-means merge:", nrow(umap_results_with_kmeans), "\n")
+cat("Rows missing k-means cluster:", sum(is.na(umap_results_with_kmeans$kmeans_cluster)), "\n")
+
+if (nrow(umap_results_with_kmeans) != nrow(umap_results_all)) {
+  stop("K-means merge changed row count.")
+}
+
+saveRDS(
+  umap_results_with_kmeans,
+  file = file.path(data_dir, paste0("umap_results_with_kmeans_k", kmeans_k_to_compare, ".rds"))
+)
+
+cat("\nPASS: K-means assignments merged with UMAP results.\n")
+
+```
+
+## Plot UMAPs by Fixed k-means Cluster
+
+```{r}
+
+plot_umap_kmeans <- function(df, analysis_name) {
+  
+  plot_data <- df %>%
+    filter(Analysis == analysis_name)
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = UMAP1,
+      y = UMAP2,
+      color = kmeans_cluster
+    )
+  ) +
+    geom_point(size = 0.45, alpha = 0.65) +
+    labs(
+      title = paste0("UMAP: ", analysis_name),
+      subtitle = paste0("Colored by existing fixed min-max k-means cluster, k = ", kmeans_k_to_compare),
+      x = "UMAP1",
+      y = "UMAP2",
+      color = "k-means cluster"
+    ) +
+    theme_bw(base_size = 13)
+  
+  return(p)
+}
+
+for (analysis_name in drift_umap_analyses) {
+  
+  p <- plot_umap_kmeans(umap_results_with_kmeans, analysis_name)
+  
+  print(p)
+  
+  ggsave(
+    file.path(
+      plot_dir,
+      paste0("umap_", analysis_name, "_by_kmeans_k", kmeans_k_to_compare, ".png")
+    ),
+    p,
+    width = 8,
+    height = 6,
+    dpi = 300
+  )
+}
+
+```
+
+## PCA Score Plots Colored by ICI and k-means Cluster
+
+```{r}
+
+# ------------------------------------------------------------
+# Merge k-means labels into sampled PCA metadata
+# ------------------------------------------------------------
+
+sampled_clicks_pca_kmeans <- sampled_clicks_with_pcs %>%
+  mutate(UID = as.character(UID)) %>%
+  left_join(
+    kmeans_assignments,
+    by = c("EventID", "UID")
+  )
+
+cat("Rows in sampled PCA metadata:", nrow(sampled_clicks_with_pcs), "\n")
+cat("Rows after k-means merge:", nrow(sampled_clicks_pca_kmeans), "\n")
+cat("Rows missing k-means cluster:",
+    sum(is.na(sampled_clicks_pca_kmeans$kmeans_cluster)), "\n")
+
+if (nrow(sampled_clicks_pca_kmeans) != nrow(sampled_clicks_with_pcs)) {
+  stop("FAIL: k-means merge changed row count.")
+}
+
+# ------------------------------------------------------------
+# PC1 vs PC2 colored by logICI
+# ------------------------------------------------------------
+
+p_pc12_logici <- ggplot(
+  sampled_clicks_pca_kmeans,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = log10_ICI_to_next_s
+  )
+) +
+  geom_point(size = 0.45, alpha = 0.55) +
+  scale_color_viridis_c(option = "plasma") +
+  labs(
+    title = "PCA Scores: PC1 vs PC2",
+    subtitle = "Colored by log10 ICI (seconds)",
+    x = "PC1",
+    y = "PC2",
+    color = "log10 ICI"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_pc12_logici)
+
+ggsave(
+  file.path(plot_dir, "pca_pc1_pc2_colored_by_logici.png"),
+  p_pc12_logici,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# PC1 vs PC2 colored by existing k-means cluster
+# ------------------------------------------------------------
+
+p_pc12_kmeans <- ggplot(
+  sampled_clicks_pca_kmeans,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = kmeans_cluster
+  )
+) +
+  geom_point(size = 0.45, alpha = 0.6) +
+  labs(
+    title = "PCA Scores: PC1 vs PC2",
+    subtitle = paste0(
+      "Colored by existing fixed min-max k-means cluster, k = ",
+      kmeans_k_to_compare
+    ),
+    x = "PC1",
+    y = "PC2",
+    color = "k-means cluster"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_pc12_kmeans)
+
+ggsave(
+  file.path(plot_dir, paste0("pca_pc1_pc2_colored_by_kmeans_k", kmeans_k_to_compare, ".png")),
+  p_pc12_kmeans,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# PC1 vs PC3 colored by k-means cluster
+# ------------------------------------------------------------
+
+p_pc13_kmeans <- ggplot(
+  sampled_clicks_pca_kmeans,
+  aes(
+    x = PC1,
+    y = PC3,
+    color = kmeans_cluster
+  )
+) +
+  geom_point(size = 0.45, alpha = 0.6) +
+  labs(
+    title = "PCA Scores: PC1 vs PC3",
+    subtitle = paste0(
+      "Colored by existing fixed min-max k-means cluster, k = ",
+      kmeans_k_to_compare
+    ),
+    x = "PC1",
+    y = "PC3",
+    color = "k-means cluster"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_pc13_kmeans)
+
+ggsave(
+  file.path(plot_dir, paste0("pca_pc1_pc3_colored_by_kmeans_k", kmeans_k_to_compare, ".png")),
+  p_pc13_kmeans,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+cat("\nPASS: PCA diagnostic plots saved.\n")
+
+```
+
+## Save and Plot PCA Loading Vectors
+
+```{r}
+
+# ------------------------------------------------------------
+# Extract PCA loadings
+# ------------------------------------------------------------
+
+pca_loadings <- as.data.frame(pca_spectra$rotation)
+
+pca_loadings <- pca_loadings %>%
+  mutate(
+    Frequency_kHz = freq_focus,
+    FreqBin = row_number()
+  ) %>%
+  relocate(FreqBin, Frequency_kHz)
+
+# ------------------------------------------------------------
+# Save full loading table
+# ------------------------------------------------------------
+
+write.csv(
+  pca_loadings,
+  file = file.path(table_dir, "pca_loading_vectors_by_frequency.csv"),
+  row.names = FALSE
+)
+
+saveRDS(
+  pca_loadings,
+  file = file.path(data_dir, "pca_loading_vectors_by_frequency.rds")
+)
+
+# ------------------------------------------------------------
+# Plot first 5 loading vectors
+# ------------------------------------------------------------
+
+pca_loadings_long <- pca_loadings %>%
+  select(Frequency_kHz, PC1, PC2, PC3, PC4, PC5) %>%
+  pivot_longer(
+    cols = starts_with("PC"),
+    names_to = "PC",
+    values_to = "Loading"
+  )
+
+p_loadings <- ggplot(
+  pca_loadings_long,
+  aes(
+    x = Frequency_kHz,
+    y = Loading
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ PC, scales = "free_y", ncol = 1) +
+  labs(
+    title = "PCA Loading Vectors for First 5 Principal Components",
+    subtitle = "Loadings show which frequency bands contribute to each spectral PC",
+    x = "Frequency (kHz)",
+    y = "Loading"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_loadings)
+
+ggsave(
+  filename = file.path(plot_dir, "pca_loading_vectors_first_5_pcs.png"),
+  plot = p_loadings,
+  width = 8,
+  height = 10,
+  dpi = 300
+)
+
+cat("Saved PCA loading vectors and loading plot.\n")
+
+```
+
+## Run HDBSCAN on Primary UMAP Analyses
+
+```{r}
+
+# ------------------------------------------------------------
+# Helper function: run HDBSCAN on one UMAP space
+# ------------------------------------------------------------
+
+run_hdbscan_analysis <- function(df, analysis_name, minPts = hdbscan_minPts) {
+  
+  cat("\n============================\n")
+  cat("Running HDBSCAN:", analysis_name, "\n")
+  cat("============================\n")
+  
+  umap_subset <- df %>%
+    filter(Analysis == analysis_name)
+  
+  umap_matrix <- umap_subset %>%
+    select(UMAP1, UMAP2) %>%
+    as.matrix()
+  
+  hdbscan_result <- dbscan::hdbscan(
+    umap_matrix,
+    minPts = minPts
+  )
+  
+  output_df <- umap_subset %>%
+    mutate(
+      HDBSCAN_cluster = factor(hdbscan_result$cluster),
+      HDBSCAN_membership_probability = hdbscan_result$membership_prob
+    )
+  
+  cluster_summary <- output_df %>%
+    count(HDBSCAN_cluster, name = "n_clicks") %>%
+    mutate(
+      percent_clicks = 100 * n_clicks / sum(n_clicks),
+      cluster_type = if_else(
+        HDBSCAN_cluster == "0",
+        "noise_unassigned",
+        "cluster"
+      )
+    ) %>%
+    arrange(desc(n_clicks))
+  
+  cat("\nCluster summary:\n")
+  print(cluster_summary)
+  
+  cat("\nNumber of clusters excluding noise:",
+      sum(cluster_summary$HDBSCAN_cluster != "0"), "\n")
+  
+  cat("Percent noise:",
+      cluster_summary$percent_clicks[cluster_summary$HDBSCAN_cluster == "0"], "\n")
+  
+  return(list(
+    result_df = output_df,
+    hdbscan_object = hdbscan_result,
+    cluster_summary = cluster_summary
+  ))
+}
+
+# ------------------------------------------------------------
+# Run primary HDBSCAN analyses
+# ------------------------------------------------------------
+
+hdbscan_5pc_only <- run_hdbscan_analysis(
+  df = umap_results_with_kmeans,
+  analysis_name = "5PC_spectra_only",
+  minPts = hdbscan_minPts
+)
+
+hdbscan_5pc_ici <- run_hdbscan_analysis(
+  df = umap_results_with_kmeans,
+  analysis_name = "5PC_plus_scaled_logICI",
+  minPts = hdbscan_minPts
+)
+
+# ------------------------------------------------------------
+# Combine HDBSCAN results
+# ------------------------------------------------------------
+
+hdbscan_results_all <- bind_rows(
+  hdbscan_5pc_only$result_df,
+  hdbscan_5pc_ici$result_df
+)
+
+# ------------------------------------------------------------
+# Save outputs
+# ------------------------------------------------------------
+
+saveRDS(
+  hdbscan_results_all,
+  file = file.path(data_dir, "hdbscan_results_primary_analyses.rds")
+)
+
+write.csv(
+  hdbscan_results_all,
+  file = file.path(table_dir, "hdbscan_results_primary_analyses.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  hdbscan_5pc_only$cluster_summary,
+  file = file.path(table_dir, "hdbscan_summary_5pc_spectra_only.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  hdbscan_5pc_ici$cluster_summary,
+  file = file.path(table_dir, "hdbscan_summary_5pc_plus_logici.csv"),
+  row.names = FALSE
+)
+
+cat("\nPASS: HDBSCAN completed for primary analyses.\n")
+
+```
+
+## Plot HDBSCAN Clusters on UMAP
+
+```{r}
+
+# ------------------------------------------------------------
+# Plot helper
+# ------------------------------------------------------------
+
+plot_hdbscan_umap <- function(df, analysis_name) {
+  
+  plot_data <- df %>%
+    filter(Analysis == analysis_name)
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = UMAP1,
+      y = UMAP2,
+      color = HDBSCAN_cluster
+    )
+  ) +
+    geom_point(
+      size = 0.5,
+      alpha = 0.65
+    ) +
+    labs(
+      title = paste0("HDBSCAN Clusters: ", analysis_name),
+      subtitle = "Cluster 0 = noise/unassigned",
+      x = "UMAP1",
+      y = "UMAP2",
+      color = "HDBSCAN\ncluster"
+    ) +
+    theme_bw(base_size = 13)
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Generate plots
+# ------------------------------------------------------------
+
+p_hdbscan_5pc_only <- plot_hdbscan_umap(
+  hdbscan_results_all,
+  "5PC_spectra_only"
+)
+
+p_hdbscan_5pc_ici <- plot_hdbscan_umap(
+  hdbscan_results_all,
+  "5PC_plus_scaled_logICI"
+)
+
+# ------------------------------------------------------------
+# Print plots
+# ------------------------------------------------------------
+
+print(p_hdbscan_5pc_only)
+print(p_hdbscan_5pc_ici)
+
+# ------------------------------------------------------------
+# Save plots
+# ------------------------------------------------------------
+
+ggsave(
+  file.path(plot_dir, "hdbscan_umap_5pc_spectra_only.png"),
+  p_hdbscan_5pc_only,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+ggsave(
+  file.path(plot_dir, "hdbscan_umap_5pc_plus_logici.png"),
+  p_hdbscan_5pc_ici,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+cat("Saved HDBSCAN UMAP plots.\n")
+
+```
+
+## Summarize ICI by HDBSCAN Cluster
+
+```{r}
+
+# ------------------------------------------------------------
+# Focus on primary joint spectral-temporal analysis
+# ------------------------------------------------------------
+
+joint_clusters <- hdbscan_results_all %>%
+  filter(Analysis == "5PC_plus_scaled_logICI")
+
+# ------------------------------------------------------------
+# ICI summary by cluster
+# ------------------------------------------------------------
+
+ici_summary_by_cluster <- joint_clusters %>%
+  group_by(HDBSCAN_cluster) %>%
+  summarise(
+    
+    n_clicks = n(),
+    
+    median_ici_s = median(ICI_to_next_s, na.rm = TRUE),
+    
+    mean_ici_s = mean(ICI_to_next_s, na.rm = TRUE),
+    
+    sd_ici_s = sd(ICI_to_next_s, na.rm = TRUE),
+    
+    min_ici_s = min(ICI_to_next_s, na.rm = TRUE),
+    
+    max_ici_s = max(ICI_to_next_s, na.rm = TRUE),
+    
+    q25_ici_s = quantile(ICI_to_next_s, 0.25, na.rm = TRUE),
+    
+    q75_ici_s = quantile(ICI_to_next_s, 0.75, na.rm = TRUE),
+    
+    n_events = n_distinct(EventID),
+    
+    n_drifts = n_distinct(DriftID_spectra),
+    
+    .groups = "drop"
+    
+  ) %>%
+  arrange(desc(n_clicks))
+
+print(ici_summary_by_cluster)
+
+write.csv(
+  ici_summary_by_cluster,
+  file = file.path(table_dir, "ici_summary_by_hdbscan_cluster.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Boxplot of ICI by cluster
+# ------------------------------------------------------------
+
+p_ici_boxplot <- ggplot(
+  joint_clusters,
+  aes(
+    x = HDBSCAN_cluster,
+    y = ICI_to_next_s,
+    fill = HDBSCAN_cluster
+  )
+) +
+  geom_boxplot(
+    outlier.size = 0.3
+  ) +
+  scale_y_log10() +
+  labs(
+    title = "ICI Distribution by HDBSCAN Cluster",
+    subtitle = "5PC + scaled logICI analysis",
+    x = "HDBSCAN cluster",
+    y = "ICI (seconds, log scale)"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_ici_boxplot)
+
+ggsave(
+  file.path(plot_dir, "ici_boxplot_by_hdbscan_cluster.png"),
+  p_ici_boxplot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+cat("Saved ICI summaries and boxplot.\n")
+
+```
+
+## Mean Spectra by HDBSCAN Cluster
+
+```{r}
+
+# ------------------------------------------------------------
+# Focus on joint spectral-temporal HDBSCAN result
+# ------------------------------------------------------------
+
+joint_clusters <- hdbscan_results_all %>%
+  filter(Analysis == "5PC_plus_scaled_logICI") %>%
+  mutate(
+    RowID = as.integer(RowID),
+    HDBSCAN_cluster = factor(HDBSCAN_cluster)
+  )
+
+# ------------------------------------------------------------
+# Pull sampled spectra for these clustered clicks
+# ------------------------------------------------------------
+
+joint_spectra <- spectra_matrix_minmax[
+  joint_clusters$RowID,
+  ,
+  drop = FALSE
+]
+
+if (nrow(joint_spectra) != nrow(joint_clusters)) {
+  stop("FAIL: Joint spectra rows do not match joint cluster metadata.")
+}
+
+# ------------------------------------------------------------
+# Compute mean and SD spectrum by HDBSCAN cluster
+# ------------------------------------------------------------
+
+cluster_spectra_summary <- list()
+
+for (cluster_id in levels(joint_clusters$HDBSCAN_cluster)) {
+  
+  cluster_rows <- which(joint_clusters$HDBSCAN_cluster == cluster_id)
+  
+  cluster_matrix <- joint_spectra[
+    cluster_rows,
+    ,
+    drop = FALSE
+  ]
+  
+  cluster_spectra_summary[[cluster_id]] <- data.frame(
+    HDBSCAN_cluster = cluster_id,
+    Frequency_kHz = freq_focus,
+    mean_minmax_spectrum = colMeans(cluster_matrix, na.rm = TRUE),
+    sd_minmax_spectrum = apply(cluster_matrix, 2, sd, na.rm = TRUE),
+    n_clicks = length(cluster_rows)
+  )
+}
+
+cluster_spectra_summary <- bind_rows(cluster_spectra_summary)
+
+write.csv(
+  cluster_spectra_summary,
+  file = file.path(table_dir, "mean_spectra_by_hdbscan_cluster.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Plot all cluster mean spectra together
+# ------------------------------------------------------------
+
+p_cluster_mean_spectra <- ggplot(
+  cluster_spectra_summary,
+  aes(
+    x = Frequency_kHz,
+    y = mean_minmax_spectrum,
+    color = HDBSCAN_cluster,
+    group = HDBSCAN_cluster
+  )
+) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Mean Min-Max Normalized Spectra by HDBSCAN Cluster",
+    subtitle = "5PC + scaled logICI analysis; cluster 0 = noise/unassigned",
+    x = "Frequency (kHz)",
+    y = "Mean min-max normalized amplitude",
+    color = "HDBSCAN\ncluster"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_cluster_mean_spectra)
+
+ggsave(
+  file.path(plot_dir, "mean_spectra_by_hdbscan_cluster_all.png"),
+  p_cluster_mean_spectra,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# Faceted plot by cluster
+# ------------------------------------------------------------
+
+p_cluster_mean_spectra_faceted <- ggplot(
+  cluster_spectra_summary,
+  aes(
+    x = Frequency_kHz,
+    y = mean_minmax_spectrum
+  )
+) +
+  geom_line(linewidth = 1) +
+  facet_wrap(
+    ~ HDBSCAN_cluster,
+    ncol = 2
+  ) +
+  labs(
+    title = "Mean Min-Max Normalized Spectra by HDBSCAN Cluster",
+    subtitle = "Faceted by cluster; cluster 0 = noise/unassigned",
+    x = "Frequency (kHz)",
+    y = "Mean min-max normalized amplitude"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_cluster_mean_spectra_faceted)
+
+ggsave(
+  file.path(plot_dir, "mean_spectra_by_hdbscan_cluster_faceted.png"),
+  p_cluster_mean_spectra_faceted,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+cat("Saved mean spectra by HDBSCAN cluster.\n")
+
+```
+
+## Stacked Mean Spectra by HDBSCAN Cluster
+
+```{r}
+
+# ------------------------------------------------------------
+# Create vertically offset cluster mean spectra
+# ------------------------------------------------------------
+
+stacked_cluster_spectra <- cluster_spectra_summary %>%
+  mutate(
+    HDBSCAN_cluster_numeric = as.numeric(as.character(HDBSCAN_cluster)),
+    cluster_label = paste0("Cluster ", HDBSCAN_cluster),
+    offset = HDBSCAN_cluster_numeric,
+    stacked_spectrum = mean_minmax_spectrum + offset
+  )
+
+# Optional: remove noise cluster 0 from main stacked figure
+stacked_cluster_spectra_no_noise <- stacked_cluster_spectra %>%
+  filter(HDBSCAN_cluster != "0")
+
+# ------------------------------------------------------------
+# Tall/narrow stacked plot
+# ------------------------------------------------------------
+
+p_stacked_spectra <- ggplot(
+  stacked_cluster_spectra_no_noise,
+  aes(
+    x = Frequency_kHz,
+    y = stacked_spectrum,
+    group = HDBSCAN_cluster,
+    color = HDBSCAN_cluster
+  )
+) +
+  geom_line(linewidth = 1.1) +
+  scale_y_continuous(
+    breaks = sort(unique(stacked_cluster_spectra_no_noise$offset)),
+    labels = sort(unique(stacked_cluster_spectra_no_noise$HDBSCAN_cluster))
+  ) +
+  labs(
+    title = "Stacked Mean Spectra by HDBSCAN Cluster",
+    subtitle = "5PC + scaled logICI analysis; noise cluster removed",
+    x = "Frequency (kHz)",
+    y = "HDBSCAN cluster"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+print(p_stacked_spectra)
+
+ggsave(
+  filename = file.path(plot_dir, "stacked_mean_spectra_by_hdbscan_cluster_no_noise.png"),
+  plot = p_stacked_spectra,
+  width = 4,
+  height = 9,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# Also save a version including noise cluster 0
+# ------------------------------------------------------------
+
+p_stacked_spectra_with_noise <- ggplot(
+  stacked_cluster_spectra,
+  aes(
+    x = Frequency_kHz,
+    y = stacked_spectrum,
+    group = HDBSCAN_cluster,
+    color = HDBSCAN_cluster
+  )
+) +
+  geom_line(linewidth = 1.1) +
+  scale_y_continuous(
+    breaks = sort(unique(stacked_cluster_spectra$offset)),
+    labels = sort(unique(stacked_cluster_spectra$HDBSCAN_cluster))
+  ) +
+  labs(
+    title = "Stacked Mean Spectra by HDBSCAN Cluster",
+    subtitle = "5PC + scaled logICI analysis; cluster 0 = noise/unassigned",
+    x = "Frequency (kHz)",
+    y = "HDBSCAN cluster"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+print(p_stacked_spectra_with_noise)
+
+ggsave(
+  filename = file.path(plot_dir, "stacked_mean_spectra_by_hdbscan_cluster_with_noise.png"),
+  plot = p_stacked_spectra_with_noise,
+  width = 4,
+  height = 9,
+  dpi = 300
+)
+
+cat("Saved stacked mean spectra figures.\n")
+
+```
+
+## Concatenated Spectrograms by HDBSCAN Cluster
+
+```{r}
+
+set.seed(cluster_spectrogram_seed)
+
+# ------------------------------------------------------------
+# Output folder
+# ------------------------------------------------------------
+
+concat_spec_dir <- file.path(
+  plot_dir,
+  "concatenated_spectrograms_by_hdbscan_cluster_baseR"
+)
+
+dir.create(concat_spec_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Color palette matching previous min-max clustering workflow
+# ------------------------------------------------------------
+
+spec_cols <- colorRampPalette(
+  c("white", "#FFD54F", "#FF9800", "#D84315", "#4E0012")
+)(200)
+
+# ------------------------------------------------------------
+# Use joint spectral-temporal HDBSCAN result
+# Exclude cluster 0 because it is noise/unassigned
+# ------------------------------------------------------------
+
+cluster_ids <- joint_clusters %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  pull(HDBSCAN_cluster) %>%
+  unique() %>%
+  as.character() %>%
+  sort()
+
+cat("Clusters to plot:\n")
+print(cluster_ids)
+
+# ------------------------------------------------------------
+# Generate one concatenated spectrogram per HDBSCAN cluster
+# ------------------------------------------------------------
+
+for (cl in cluster_ids) {
+  
+  cluster_metadata <- joint_clusters %>%
+    filter(HDBSCAN_cluster == cl)
+  
+  n_total_cluster <- nrow(cluster_metadata)
+  
+  if (n_total_cluster == 0) next
+  
+  # Sample up to max_clicks_per_cluster_spectrogram clicks.
+  # This is NOT ordered by ICI; it is random sampled order.
+  cluster_metadata_plot <- cluster_metadata %>%
+    slice_sample(
+      n = min(max_clicks_per_cluster_spectrogram, n_total_cluster),
+      replace = FALSE
+    )
+  
+  cluster_spec <- spectra_matrix_minmax[
+    cluster_metadata_plot$RowID,
+    ,
+    drop = FALSE
+  ]
+  
+  median_ici <- median(cluster_metadata$ICI_to_next_s, na.rm = TRUE)
+  mean_ici <- mean(cluster_metadata$ICI_to_next_s, na.rm = TRUE)
+  n_events <- n_distinct(cluster_metadata$EventID)
+  n_drifts <- n_distinct(cluster_metadata$DriftID_spectra)
+  
+  out_file <- file.path(
+    concat_spec_dir,
+    paste0(
+      "concatenated_spectrogram_hdbscan_cluster_",
+      cl,
+      "_5PC_plus_scaled_logICI.png"
+    )
+  )
+  
+  png(out_file, width = 1800, height = 900)
+  
+  image(
+    x = seq_len(nrow(cluster_spec)),
+    y = freq_focus,
+    z = cluster_spec,
+    col = spec_cols,
+    xlab = "Click Number",
+    ylab = "Frequency (kHz)",
+    main = paste0(
+      "Concatenated Click Spectrogram - HDBSCAN Cluster ",
+      cl,
+      "\n5PC + scaled logICI; n = ", n_total_cluster,
+      "; plotted = ", nrow(cluster_metadata_plot),
+      "; median ICI = ", round(median_ici, 3), " s",
+      "; mean ICI = ", round(mean_ici, 3), " s",
+      "; ", n_events, " events; ", n_drifts, " drifts"
+    ),
+    useRaster = TRUE,
+    axes = FALSE
+  )
+  
+  axis(1)
+  axis(2, at = seq(20, 50, by = 10))
+  box()
+  
+  dev.off()
+  
+  cat("Saved:", out_file, "\n")
+}
+
+cat("\nFinished concatenated spectrograms for HDBSCAN clusters.\n")
+cat("Output folder:\n")
+cat(concat_spec_dir, "\n")
+
+```
+
+## Check HDBSCAN Cluster Composition by Event and Drift
+
+```{r}
+
+# ------------------------------------------------------------
+# Focus on joint spectral-temporal HDBSCAN result
+# ------------------------------------------------------------
+
+joint_clusters <- hdbscan_results_all %>%
+  filter(Analysis == "5PC_plus_scaled_logICI") %>%
+  mutate(
+    HDBSCAN_cluster = factor(HDBSCAN_cluster)
+  )
+
+# ------------------------------------------------------------
+# Overall cluster coverage summary
+# ------------------------------------------------------------
+
+cluster_coverage_summary <- joint_clusters %>%
+  group_by(HDBSCAN_cluster) %>%
+  summarise(
+    n_clicks = n(),
+    percent_clicks = 100 * n_clicks / nrow(joint_clusters),
+    n_events = n_distinct(EventID),
+    n_drifts = n_distinct(DriftID_spectra),
+    median_ici_s = median(ICI_to_next_s, na.rm = TRUE),
+    mean_ici_s = mean(ICI_to_next_s, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_clicks))
+
+cat("Cluster coverage summary:\n")
+print(cluster_coverage_summary)
+
+write.csv(
+  cluster_coverage_summary,
+  file = file.path(table_dir, "hdbscan_cluster_coverage_summary.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Cluster composition by EventID
+# ------------------------------------------------------------
+
+cluster_event_composition <- joint_clusters %>%
+  count(HDBSCAN_cluster, EventID, name = "n_clicks") %>%
+  group_by(HDBSCAN_cluster) %>%
+  mutate(
+    cluster_total_clicks = sum(n_clicks),
+    percent_of_cluster = 100 * n_clicks / cluster_total_clicks
+  ) %>%
+  ungroup() %>%
+  arrange(HDBSCAN_cluster, desc(n_clicks))
+
+cat("\nCluster composition by EventID:\n")
+print(cluster_event_composition, n = 50)
+
+write.csv(
+  cluster_event_composition,
+  file = file.path(table_dir, "hdbscan_cluster_composition_by_event.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Top contributing events per cluster
+# ------------------------------------------------------------
+
+top_events_per_cluster <- cluster_event_composition %>%
+  group_by(HDBSCAN_cluster) %>%
+  slice_max(
+    order_by = n_clicks,
+    n = 5,
+    with_ties = FALSE
+  ) %>%
+  ungroup() %>%
+  arrange(HDBSCAN_cluster, desc(n_clicks))
+
+cat("\nTop 5 contributing events per cluster:\n")
+print(top_events_per_cluster, n = Inf)
+
+write.csv(
+  top_events_per_cluster,
+  file = file.path(table_dir, "hdbscan_top_events_per_cluster.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Cluster composition by DriftID
+# ------------------------------------------------------------
+
+cluster_drift_composition <- joint_clusters %>%
+  count(HDBSCAN_cluster, DriftID_spectra, name = "n_clicks") %>%
+  group_by(HDBSCAN_cluster) %>%
+  mutate(
+    cluster_total_clicks = sum(n_clicks),
+    percent_of_cluster = 100 * n_clicks / cluster_total_clicks
+  ) %>%
+  ungroup() %>%
+  arrange(HDBSCAN_cluster, desc(n_clicks))
+
+cat("\nCluster composition by DriftID:\n")
+print(cluster_drift_composition, n = 50)
+
+write.csv(
+  cluster_drift_composition,
+  file = file.path(table_dir, "hdbscan_cluster_composition_by_drift.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Top contributing drifts per cluster
+# ------------------------------------------------------------
+
+top_drifts_per_cluster <- cluster_drift_composition %>%
+  group_by(HDBSCAN_cluster) %>%
+  slice_max(
+    order_by = n_clicks,
+    n = 5,
+    with_ties = FALSE
+  ) %>%
+  ungroup() %>%
+  arrange(HDBSCAN_cluster, desc(n_clicks))
+
+cat("\nTop 5 contributing drifts per cluster:\n")
+print(top_drifts_per_cluster, n = Inf)
+
+write.csv(
+  top_drifts_per_cluster,
+  file = file.path(table_dir, "hdbscan_top_drifts_per_cluster.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Flag potentially event-dominated clusters
+# ------------------------------------------------------------
+
+event_dominance_summary <- cluster_event_composition %>%
+  group_by(HDBSCAN_cluster) %>%
+  summarise(
+    top_event = EventID[which.max(n_clicks)],
+    top_event_clicks = max(n_clicks),
+    top_event_percent = max(percent_of_cluster),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(top_event_percent))
+
+cat("\nEvent dominance summary:\n")
+print(event_dominance_summary)
+
+write.csv(
+  event_dominance_summary,
+  file = file.path(table_dir, "hdbscan_event_dominance_summary.csv"),
+  row.names = FALSE
+)
+
+drift_dominance_summary <- cluster_drift_composition %>%
+  group_by(HDBSCAN_cluster) %>%
+  summarise(
+    top_drift = DriftID_spectra[which.max(n_clicks)],
+    top_drift_clicks = max(n_clicks),
+    top_drift_percent = max(percent_of_cluster),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(top_drift_percent))
+
+cat("\nDrift dominance summary:\n")
+print(drift_dominance_summary)
+
+write.csv(
+  drift_dominance_summary,
+  file = file.path(table_dir, "hdbscan_drift_dominance_summary.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Simple bar plot: top events per cluster
+# ------------------------------------------------------------
+
+p_top_events <- ggplot(
+  top_events_per_cluster,
+  aes(
+    x = reorder(EventID, n_clicks),
+    y = n_clicks,
+    fill = HDBSCAN_cluster
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(
+    ~ HDBSCAN_cluster,
+    scales = "free_y"
+  ) +
+  labs(
+    title = "Top Contributing Events per HDBSCAN Cluster",
+    subtitle = "5PC + scaled logICI analysis",
+    x = "EventID",
+    y = "Number of clicks"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none"
+  )
+
+print(p_top_events)
+
+ggsave(
+  filename = file.path(plot_dir, "top_events_per_hdbscan_cluster.png"),
+  plot = p_top_events,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# Simple bar plot: top drifts per cluster
+# ------------------------------------------------------------
+
+p_top_drifts <- ggplot(
+  top_drifts_per_cluster,
+  aes(
+    x = reorder(DriftID_spectra, n_clicks),
+    y = n_clicks,
+    fill = HDBSCAN_cluster
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(
+    ~ HDBSCAN_cluster,
+    scales = "free_y"
+  ) +
+  labs(
+    title = "Top Contributing Drifts per HDBSCAN Cluster",
+    subtitle = "5PC + scaled logICI analysis",
+    x = "DriftID",
+    y = "Number of clicks"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none"
+  )
+
+print(p_top_drifts)
+
+ggsave(
+  filename = file.path(plot_dir, "top_drifts_per_hdbscan_cluster.png"),
+  plot = p_top_drifts,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+cat("\nPASS: Cluster composition diagnostics completed and saved.\n")
+
+```
+
+## Mean Spectra with Variability Ribbons for All Non-Noise Clusters
+
+```{r}
+
+# ------------------------------------------------------------
+# Use non-noise HDBSCAN clusters from joint analysis
+# ------------------------------------------------------------
+
+cluster_spectra_ribbon_data <- cluster_spectra_summary %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  mutate(
+    lower_sd = pmax(mean_minmax_spectrum - sd_minmax_spectrum, 0),
+    upper_sd = pmin(mean_minmax_spectrum + sd_minmax_spectrum, 1)
+  )
+
+# ------------------------------------------------------------
+# Faceted mean ± SD ribbons
+# ------------------------------------------------------------
+
+p_cluster_spectra_ribbons <- ggplot(
+  cluster_spectra_ribbon_data,
+  aes(
+    x = Frequency_kHz,
+    y = mean_minmax_spectrum
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = lower_sd,
+      ymax = upper_sd
+    ),
+    alpha = 0.25
+  ) +
+  geom_line(linewidth = 1) +
+  facet_wrap(
+    ~ HDBSCAN_cluster,
+    ncol = 2
+  ) +
+  labs(
+    title = "Mean Spectra with Variability by HDBSCAN Cluster",
+    subtitle = "Mean ± 1 SD; 5PC + scaled logICI analysis; noise cluster excluded",
+    x = "Frequency (kHz)",
+    y = "Min-max normalized amplitude"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_cluster_spectra_ribbons)
+
+ggsave(
+  filename = file.path(plot_dir, "mean_spectra_with_sd_ribbons_hdbscan_clusters_1_to_6.png"),
+  plot = p_cluster_spectra_ribbons,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# Save ribbon data
+# ------------------------------------------------------------
+
+write.csv(
+  cluster_spectra_ribbon_data,
+  file = file.path(table_dir, "mean_spectra_with_sd_ribbons_hdbscan_clusters_1_to_6.csv"),
+  row.names = FALSE
+)
+
+cat("Saved mean spectra with SD ribbons for all non-noise clusters.\n")
+
+```
+
+----------------------------------------------
+
+## Full Dataset Assignment
+
+## Force-Assign All Eligible Clicks to Nearest HDBSCAN cluster
+
+```{r}
+
+# ------------------------------------------------------------
+# Output folder for full-dataset assignment
+# ------------------------------------------------------------
+
+full_assignment_dir <- file.path(
+  "E:/Analysis/PCA_ICI_UMAP_HDBSCAN",
+  "Full_Eligible_Click_Assignment_1x_scaled_logICI"
+)
+
+full_assignment_dirs <- make_output_folders(full_assignment_dir)
+
+# ------------------------------------------------------------
+# Recreate full eligible click table
+# These are all clicks with ICI between 0.01 and 0.4 s
+# ------------------------------------------------------------
+
+all_eligible_clicks <- spectra_metadata_with_ici %>%
+  mutate(
+    RowID = row_number()
+  ) %>%
+  filter(
+    ICI_filter_category == "kept_0.01_to_0.4_s"
+  )
+
+cat("All eligible clicks:", nrow(all_eligible_clicks), "\n")
+
+# ------------------------------------------------------------
+# Pull min-max spectra for all eligible clicks
+# ------------------------------------------------------------
+
+all_eligible_spectra_minmax <- spectra_matrix_minmax[
+  all_eligible_clicks$RowID,
+  ,
+  drop = FALSE
+]
+
+cat("All eligible spectra matrix dimensions:\n")
+print(dim(all_eligible_spectra_minmax))
+
+if (nrow(all_eligible_spectra_minmax) != nrow(all_eligible_clicks)) {
+  stop("FAIL: Eligible spectra rows do not match eligible metadata rows.")
+}
+
+# ------------------------------------------------------------
+# Project all eligible clicks into the existing PCA space
+# IMPORTANT: This uses the PCA fit from the sampled dataset.
+# It does NOT refit PCA.
+# ------------------------------------------------------------
+
+all_eligible_pc_scores <- predict(
+  pca_spectra,
+  newdata = all_eligible_spectra_minmax
+)
+
+all_eligible_pc_scores <- as.data.frame(all_eligible_pc_scores)
+
+# ------------------------------------------------------------
+# Scale logICI using the SAME mean and SD from the sampled analysis
+# IMPORTANT: Do not rescale using the full dataset.
+# ------------------------------------------------------------
+
+sampled_logici_mean <- mean(sampled_clicks_with_pcs$log10_ICI_to_next_s, na.rm = TRUE)
+sampled_logici_sd <- sd(sampled_clicks_with_pcs$log10_ICI_to_next_s, na.rm = TRUE)
+
+all_eligible_with_pcs <- bind_cols(
+  all_eligible_clicks,
+  all_eligible_pc_scores
+) %>%
+  mutate(
+    log10_ICI_to_next_s = log10(ICI_to_next_s),
+    scaled_log10_ICI = as.numeric(
+      (log10_ICI_to_next_s - sampled_logici_mean) / sampled_logici_sd
+    )
+  )
+
+cat("\nSummary of scaled logICI for all eligible clicks:\n")
+print(summary(all_eligible_with_pcs$scaled_log10_ICI))
+
+# ------------------------------------------------------------
+# Build full feature matrix: 5 PCs + scaled logICI
+# ------------------------------------------------------------
+
+all_eligible_feature_matrix <- all_eligible_with_pcs %>%
+  select(all_of(pc_set_5), scaled_log10_ICI) %>%
+  as.matrix()
+
+if (any(!is.finite(all_eligible_feature_matrix))) {
+  stop("FAIL: Full eligible feature matrix contains non-finite values.")
+}
+
+cat("\nFull eligible feature matrix dimensions:\n")
+print(dim(all_eligible_feature_matrix))
+
+# ------------------------------------------------------------
+# Build cluster centroids from original sampled HDBSCAN labels
+# Use only non-noise clusters 1–6
+# Centroids are computed in 5PC + scaled logICI feature space.
+# ------------------------------------------------------------
+
+sampled_joint_clusters <- hdbscan_results_all %>%
+  filter(Analysis == "5PC_plus_scaled_logICI") %>%
+  mutate(
+    HDBSCAN_cluster_original = as.character(HDBSCAN_cluster)
+  )
+
+non_noise_sampled <- sampled_joint_clusters %>%
+  filter(HDBSCAN_cluster_original != "0")
+
+cluster_centroids <- non_noise_sampled %>%
+  group_by(HDBSCAN_cluster_original) %>%
+  summarise(
+    across(
+      all_of(c(pc_set_5, "scaled_log10_ICI")),
+      mean,
+      na.rm = TRUE
+    ),
+    n_sampled_cluster_clicks = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(as.numeric(HDBSCAN_cluster_original))
+
+print(cluster_centroids)
+
+write.csv(
+  cluster_centroids,
+  file = file.path(
+    full_assignment_dirs$tables,
+    "hdbscan_cluster_centroids_5pc_scaled_logici.csv"
+  ),
+  row.names = FALSE
+)
+
+centroid_matrix <- cluster_centroids %>%
+  select(all_of(c(pc_set_5, "scaled_log10_ICI"))) %>%
+  as.matrix()
+
+centroid_labels <- cluster_centroids$HDBSCAN_cluster_original
+
+# ------------------------------------------------------------
+# Assign each eligible click to nearest non-noise centroid
+# ------------------------------------------------------------
+
+distance_to_centroids <- sapply(
+  seq_len(nrow(centroid_matrix)),
+  function(j) {
+    rowSums(
+      sweep(
+        all_eligible_feature_matrix,
+        2,
+        centroid_matrix[j, ],
+        FUN = "-"
+      )^2
+    )
+  }
+)
+
+nearest_centroid_index <- max.col(
+  -distance_to_centroids,
+  ties.method = "first"
+)
+
+nearest_centroid_distance <- sqrt(
+  distance_to_centroids[
+    cbind(seq_len(nrow(distance_to_centroids)), nearest_centroid_index)
+  ]
+)
+
+all_eligible_assigned <- all_eligible_with_pcs %>%
+  mutate(
+    HDBSCAN_cluster_forced = factor(
+      centroid_labels[nearest_centroid_index],
+      levels = centroid_labels
+    ),
+    distance_to_forced_cluster_centroid = nearest_centroid_distance
+  )
+
+# ------------------------------------------------------------
+# Add original HDBSCAN label for sampled clicks only
+# For unsampled eligible clicks, this will be NA.
+# ------------------------------------------------------------
+
+sampled_original_labels <- sampled_joint_clusters %>%
+  select(
+    EventID,
+    UID,
+    HDBSCAN_cluster_original = HDBSCAN_cluster
+  ) %>%
+  mutate(
+    UID = as.character(UID),
+    HDBSCAN_cluster_original = as.character(HDBSCAN_cluster_original)
+  )
+
+all_eligible_assigned <- all_eligible_assigned %>%
+  mutate(UID = as.character(UID)) %>%
+  left_join(
+    sampled_original_labels,
+    by = c("EventID", "UID")
+  )
+
+cat("\nRows after adding sampled original labels:", nrow(all_eligible_assigned), "\n")
+cat("Sampled clicks with original HDBSCAN labels:",
+    sum(!is.na(all_eligible_assigned$HDBSCAN_cluster_original)), "\n")
+
+# ------------------------------------------------------------
+# Save assigned full eligible dataset
+# ------------------------------------------------------------
+
+saveRDS(
+  all_eligible_assigned,
+  file = file.path(
+    full_assignment_dirs$data,
+    "all_eligible_clicks_forced_hdbscan_assignment_1x.rds"
+  )
+)
+
+write.csv(
+  all_eligible_assigned,
+  file = file.path(
+    full_assignment_dirs$tables,
+    "all_eligible_clicks_forced_hdbscan_assignment_1x.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Summarize forced assignments
+# ------------------------------------------------------------
+
+forced_assignment_summary <- all_eligible_assigned %>%
+  count(HDBSCAN_cluster_forced, name = "n_clicks") %>%
+  mutate(
+    percent_clicks = 100 * n_clicks / sum(n_clicks)
+  ) %>%
+  arrange(desc(n_clicks))
+
+cat("\nForced assignment summary for all eligible clicks:\n")
+print(forced_assignment_summary)
+
+write.csv(
+  forced_assignment_summary,
+  file = file.path(
+    full_assignment_dirs$tables,
+    "forced_assignment_summary_all_eligible_clicks.csv"
+  ),
+  row.names = FALSE
+)
+
+cat("\nPASS: All eligible clicks assigned to nearest non-noise HDBSCAN cluster.\n")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-------------------------------------------------------
+
+#Sensitivy of ICI
+
+## Set Up Sensitivity Output Folders
+
+```{r}
+
+# ------------------------------------------------------------
+# Sensitivity analysis output folders
+# ------------------------------------------------------------
+
+sensitivity_base_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN"
+
+main_1x_dir <- file.path(sensitivity_base_dir, "Main_1x_scaled_logICI")
+weight_05_dir <- file.path(sensitivity_base_dir, "Reduced_0.5x_scaled_logICI")
+weight_025_dir <- file.path(sensitivity_base_dir, "Reduced_0.25x_scaled_logICI")
+
+make_output_folders <- function(base_dir) {
+  
+  dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  subdirs <- list(
+    plots = file.path(base_dir, "plots"),
+    data = file.path(base_dir, "data"),
+    tables = file.path(base_dir, "tables")
+  )
+  
+  dir.create(subdirs$plots, recursive = TRUE, showWarnings = FALSE)
+  dir.create(subdirs$data, recursive = TRUE, showWarnings = FALSE)
+  dir.create(subdirs$tables, recursive = TRUE, showWarnings = FALSE)
+  
+  return(subdirs)
+}
+
+main_1x_dirs <- make_output_folders(main_1x_dir)
+weight_05_dirs <- make_output_folders(weight_05_dir)
+weight_025_dirs <- make_output_folders(weight_025_dir)
+
+cat("Created sensitivity output folders:\n")
+cat(main_1x_dir, "\n")
+cat(weight_05_dir, "\n")
+cat(weight_025_dir, "\n")
+
+```
+
+## Run Reduced ICI Weight Sensitivity Analysis
+
+```{r}
+
+# ------------------------------------------------------------
+# Helper function for one weighted ICI sensitivity run
+# ------------------------------------------------------------
+
+run_weighted_ici_sensitivity <- function(
+    ici_weight,
+    analysis_name,
+    output_dirs
+) {
+  
+  cat("\n============================\n")
+  cat("Running sensitivity analysis:", analysis_name, "\n")
+  cat("ICI weight:", ici_weight, "\n")
+  cat("============================\n")
+  
+  # ----------------------------------------------------------
+  # Build weighted feature matrix
+  # ----------------------------------------------------------
+  
+  feature_matrix_weighted <- sampled_clicks_with_pcs %>%
+    mutate(
+      weighted_scaled_log10_ICI = ici_weight * scaled_log10_ICI
+    ) %>%
+    select(all_of(pc_set_5), weighted_scaled_log10_ICI) %>%
+    as.matrix()
+  
+  cat("Feature matrix dimensions:\n")
+  print(dim(feature_matrix_weighted))
+  
+  if (any(!is.finite(feature_matrix_weighted))) {
+    stop("Weighted feature matrix contains non-finite values.")
+  }
+  
+  # ----------------------------------------------------------
+  # Run UMAP
+  # ----------------------------------------------------------
+  
+  umap_weighted <- run_umap_analysis(
+    feature_matrix = feature_matrix_weighted,
+    analysis_name = analysis_name
+  )
+  
+  umap_weighted_df <- bind_cols(
+    sampled_clicks_with_pcs,
+    umap_weighted
+  ) %>%
+    mutate(
+      ICI_weight = ici_weight
+    )
+  
+  # ----------------------------------------------------------
+  # Run HDBSCAN
+  # ----------------------------------------------------------
+  
+  hdbscan_result <- dbscan::hdbscan(
+    umap_weighted_df %>%
+      select(UMAP1, UMAP2) %>%
+      as.matrix(),
+    minPts = hdbscan_minPts
+  )
+  
+  hdbscan_weighted_df <- umap_weighted_df %>%
+    mutate(
+      HDBSCAN_cluster = factor(hdbscan_result$cluster),
+      HDBSCAN_membership_probability = hdbscan_result$membership_prob
+    )
+  
+  # ----------------------------------------------------------
+  # Cluster summary
+  # ----------------------------------------------------------
+  
+  cluster_summary <- hdbscan_weighted_df %>%
+    count(HDBSCAN_cluster, name = "n_clicks") %>%
+    mutate(
+      percent_clicks = 100 * n_clicks / sum(n_clicks),
+      cluster_type = if_else(
+        HDBSCAN_cluster == "0",
+        "noise_unassigned",
+        "cluster"
+      )
+    ) %>%
+    arrange(desc(n_clicks))
+  
+  print(cluster_summary)
+  
+  # ----------------------------------------------------------
+  # ICI summary by cluster
+  # ----------------------------------------------------------
+  
+  ici_summary <- hdbscan_weighted_df %>%
+    group_by(HDBSCAN_cluster) %>%
+    summarise(
+      n_clicks = n(),
+      percent_clicks = 100 * n_clicks / nrow(hdbscan_weighted_df),
+      median_ici_s = median(ICI_to_next_s, na.rm = TRUE),
+      mean_ici_s = mean(ICI_to_next_s, na.rm = TRUE),
+      q25_ici_s = quantile(ICI_to_next_s, 0.25, na.rm = TRUE),
+      q75_ici_s = quantile(ICI_to_next_s, 0.75, na.rm = TRUE),
+      n_events = n_distinct(EventID),
+      n_drifts = n_distinct(DriftID_spectra),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(n_clicks))
+  
+  # ----------------------------------------------------------
+  # Save data/tables
+  # ----------------------------------------------------------
+  
+  saveRDS(
+    feature_matrix_weighted,
+    file = file.path(output_dirs$data, paste0("feature_matrix_", analysis_name, ".rds"))
+  )
+  
+  saveRDS(
+    umap_weighted_df,
+    file = file.path(output_dirs$data, paste0("umap_results_", analysis_name, ".rds"))
+  )
+  
+  saveRDS(
+    hdbscan_weighted_df,
+    file = file.path(output_dirs$data, paste0("hdbscan_results_", analysis_name, ".rds"))
+  )
+  
+  write.csv(
+    cluster_summary,
+    file = file.path(output_dirs$tables, paste0("hdbscan_cluster_summary_", analysis_name, ".csv")),
+    row.names = FALSE
+  )
+  
+  write.csv(
+    ici_summary,
+    file = file.path(output_dirs$tables, paste0("ici_summary_by_hdbscan_cluster_", analysis_name, ".csv")),
+    row.names = FALSE
+  )
+  
+  # ----------------------------------------------------------
+  # Plot UMAP colored by logICI
+  # ----------------------------------------------------------
+  
+  p_logici <- ggplot(
+    hdbscan_weighted_df,
+    aes(
+      x = UMAP1,
+      y = UMAP2,
+      color = log10_ICI_to_next_s
+    )
+  ) +
+    geom_point(size = 0.45, alpha = 0.55) +
+    scale_color_viridis_c(option = "plasma") +
+    labs(
+      title = paste0("UMAP: ", analysis_name),
+      subtitle = paste0("5 PCs + ", ici_weight, " × scaled log10 ICI; colored by log10 ICI"),
+      x = "UMAP1",
+      y = "UMAP2",
+      color = "log10 ICI"
+    ) +
+    theme_bw(base_size = 13)
+  
+  print(p_logici)
+  
+  ggsave(
+    filename = file.path(output_dirs$plots, paste0("umap_", analysis_name, "_colored_by_logici.png")),
+    plot = p_logici,
+    width = 7,
+    height = 6,
+    dpi = 300
+  )
+  
+  # ----------------------------------------------------------
+  # Plot UMAP colored by HDBSCAN cluster
+  # ----------------------------------------------------------
+  
+  p_hdbscan <- ggplot(
+    hdbscan_weighted_df,
+    aes(
+      x = UMAP1,
+      y = UMAP2,
+      color = HDBSCAN_cluster
+    )
+  ) +
+    geom_point(size = 0.5, alpha = 0.65) +
+    labs(
+      title = paste0("HDBSCAN Clusters: ", analysis_name),
+      subtitle = paste0("5 PCs + ", ici_weight, " × scaled log10 ICI; cluster 0 = noise/unassigned"),
+      x = "UMAP1",
+      y = "UMAP2",
+      color = "HDBSCAN\ncluster"
+    ) +
+    theme_bw(base_size = 13)
+  
+  print(p_hdbscan)
+  
+  ggsave(
+    filename = file.path(output_dirs$plots, paste0("hdbscan_umap_", analysis_name, ".png")),
+    plot = p_hdbscan,
+    width = 8,
+    height = 6,
+    dpi = 300
+  )
+  
+  # ----------------------------------------------------------
+  # ICI boxplot by HDBSCAN cluster
+  # ----------------------------------------------------------
+  
+  p_ici_boxplot <- ggplot(
+    hdbscan_weighted_df,
+    aes(
+      x = HDBSCAN_cluster,
+      y = ICI_to_next_s,
+      fill = HDBSCAN_cluster
+    )
+  ) +
+    geom_boxplot(outlier.size = 0.3) +
+    scale_y_log10() +
+    labs(
+      title = paste0("ICI Distribution by HDBSCAN Cluster: ", analysis_name),
+      subtitle = paste0("5 PCs + ", ici_weight, " × scaled log10 ICI"),
+      x = "HDBSCAN cluster",
+      y = "ICI (seconds, log scale)"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(legend.position = "none")
+  
+  print(p_ici_boxplot)
+  
+  ggsave(
+    filename = file.path(output_dirs$plots, paste0("ici_boxplot_by_hdbscan_cluster_", analysis_name, ".png")),
+    plot = p_ici_boxplot,
+    width = 8,
+    height = 6,
+    dpi = 300
+  )
+  
+  return(list(
+    feature_matrix = feature_matrix_weighted,
+    umap_df = umap_weighted_df,
+    hdbscan_df = hdbscan_weighted_df,
+    hdbscan_object = hdbscan_result,
+    cluster_summary = cluster_summary,
+    ici_summary = ici_summary
+  ))
+}
+
+# ------------------------------------------------------------
+# Run reduced-weight sensitivity analyses
+# ------------------------------------------------------------
+
+sensitivity_05x <- run_weighted_ici_sensitivity(
+  ici_weight = 0.5,
+  analysis_name = "5PC_plus_0.5x_scaled_logICI",
+  output_dirs = weight_05_dirs
+)
+
+sensitivity_025x <- run_weighted_ici_sensitivity(
+  ici_weight = 0.25,
+  analysis_name = "5PC_plus_0.25x_scaled_logICI",
+  output_dirs = weight_025_dirs
+)
+
+cat("\nPASS: Reduced ICI weight sensitivity analyses complete.\n")
+
+```
+
+## Mean Spectra for Reduced ICI-Weight Clusters
+
+```{r}
+
+make_weighted_cluster_spectra <- function(
+    sensitivity_result,
+    analysis_name,
+    output_dirs
+) {
+  
+  hdbscan_df <- sensitivity_result$hdbscan_df %>%
+    mutate(
+      RowID = as.integer(RowID),
+      HDBSCAN_cluster = factor(HDBSCAN_cluster)
+    )
+  
+  spectra_for_clusters <- spectra_matrix_minmax[
+    hdbscan_df$RowID,
+    ,
+    drop = FALSE
+  ]
+  
+  cluster_ids <- levels(hdbscan_df$HDBSCAN_cluster)
+  
+  spectra_summary <- list()
+  
+  for (cl in cluster_ids) {
+    
+    cluster_rows <- which(hdbscan_df$HDBSCAN_cluster == cl)
+    
+    cluster_matrix <- spectra_for_clusters[
+      cluster_rows,
+      ,
+      drop = FALSE
+    ]
+    
+    spectra_summary[[cl]] <- data.frame(
+      HDBSCAN_cluster = cl,
+      Frequency_kHz = freq_focus,
+      mean_minmax_spectrum = colMeans(cluster_matrix, na.rm = TRUE),
+      sd_minmax_spectrum = apply(cluster_matrix, 2, sd, na.rm = TRUE),
+      n_clicks = length(cluster_rows)
+    )
+  }
+  
+  spectra_summary <- bind_rows(spectra_summary) %>%
+    mutate(
+      lower_sd = pmax(mean_minmax_spectrum - sd_minmax_spectrum, 0),
+      upper_sd = pmin(mean_minmax_spectrum + sd_minmax_spectrum, 1)
+    )
+  
+  write.csv(
+    spectra_summary,
+    file = file.path(
+      output_dirs$tables,
+      paste0("mean_spectra_by_hdbscan_cluster_", analysis_name, ".csv")
+    ),
+    row.names = FALSE
+  )
+  
+  # ------------------------------------------------------------
+  # Overlay plot
+  # ------------------------------------------------------------
+  
+  p_overlay <- ggplot(
+    spectra_summary,
+    aes(
+      x = Frequency_kHz,
+      y = mean_minmax_spectrum,
+      color = HDBSCAN_cluster,
+      group = HDBSCAN_cluster
+    )
+  ) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste0("Mean Spectra by HDBSCAN Cluster: ", analysis_name),
+      subtitle = "Cluster 0 = noise/unassigned",
+      x = "Frequency (kHz)",
+      y = "Mean min-max normalized amplitude",
+      color = "HDBSCAN\ncluster"
+    ) +
+    theme_bw(base_size = 13)
+  
+  print(p_overlay)
+  
+  ggsave(
+    filename = file.path(
+      output_dirs$plots,
+      paste0("mean_spectra_overlay_", analysis_name, ".png")
+    ),
+    plot = p_overlay,
+    width = 8,
+    height = 6,
+    dpi = 300
+  )
+  
+  # ------------------------------------------------------------
+  # Faceted mean ± SD plot
+  # ------------------------------------------------------------
+  
+  p_ribbons <- ggplot(
+    spectra_summary,
+    aes(
+      x = Frequency_kHz,
+      y = mean_minmax_spectrum
+    )
+  ) +
+    geom_ribbon(
+      aes(
+        ymin = lower_sd,
+        ymax = upper_sd
+      ),
+      alpha = 0.25
+    ) +
+    geom_line(linewidth = 1) +
+    facet_wrap(
+      ~ HDBSCAN_cluster,
+      ncol = 2
+    ) +
+    labs(
+      title = paste0("Mean Spectra with Variability: ", analysis_name),
+      subtitle = "Mean ± 1 SD; cluster 0 = noise/unassigned",
+      x = "Frequency (kHz)",
+      y = "Min-max normalized amplitude"
+    ) +
+    theme_bw(base_size = 13)
+  
+  print(p_ribbons)
+  
+  ggsave(
+    filename = file.path(
+      output_dirs$plots,
+      paste0("mean_spectra_with_sd_ribbons_", analysis_name, ".png")
+    ),
+    plot = p_ribbons,
+    width = 10,
+    height = 8,
+    dpi = 300
+  )
+  
+  return(spectra_summary)
+}
+
+spectra_summary_05x <- make_weighted_cluster_spectra(
+  sensitivity_result = sensitivity_05x,
+  analysis_name = "5PC_plus_0.5x_scaled_logICI",
+  output_dirs = weight_05_dirs
+)
+
+spectra_summary_025x <- make_weighted_cluster_spectra(
+  sensitivity_result = sensitivity_025x,
+  analysis_name = "5PC_plus_0.25x_scaled_logICI",
+  output_dirs = weight_025_dirs
+)
+
+cat("Saved spectra plots for reduced ICI-weight clusters.\n")
+
+```
+
+-------------------------------------------------------
+
+## Reload Existing PCA/UMAP/HDBSCAN Objects
+
+```{r}
+
+## Reload Existing PCA/ICI/UMAP/HDBSCAN Outputs
+
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(stringr)
+library(dbscan)
+
+output_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN"
+
+# Find all RDS files under the workflow folder
+all_rds_files <- list.files(
+  output_dir,
+  pattern = "\\.rds$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+cat("RDS files found:\n")
+print(all_rds_files)
+
+find_rds <- function(pattern) {
+  matches <- all_rds_files[str_detect(basename(all_rds_files), pattern)]
+  
+  if (length(matches) == 0) {
+    stop("No RDS file found matching: ", pattern)
+  }
+  
+  if (length(matches) > 1) {
+    cat("Multiple matches found for:", pattern, "\n")
+    print(matches)
+    cat("Using first match:\n", matches[1], "\n")
+  }
+  
+  matches[1]
+}
+
+sampled_clicks_with_pcs <- readRDS(
+  find_rds("sampled_clicks_with_pcs_and_scaled_logici")
+)
+
+umap_results_all <- readRDS(
+  find_rds("umap_results_all_main_comparisons")
+)
+
+hdbscan_results_all <- readRDS(
+  find_rds("hdbscan_results_primary_analyses")
+)
+
+spectra_matrix_sampled_minmax <- readRDS(
+  find_rds("sampled_minmax_spectra_matrix_19_50_khz")
+)
+
+pca_spectra <- readRDS(
+  find_rds("pca_spectra_sampled_minmax_19_50_khz")
+)
+
+pca_loadings <- readRDS(
+  find_rds("pca_loading_vectors_by_frequency")
+)
+
+freq_focus <- pca_loadings$Frequency_kHz
+
+#Sanity check
+
+cat("\nReload check:\n")
+cat("sampled_clicks_with_pcs rows:", nrow(sampled_clicks_with_pcs), "\n")
+cat("umap_results_all rows:", nrow(umap_results_all), "\n")
+cat("hdbscan_results_all rows:", nrow(hdbscan_results_all), "\n")
+cat("spectra_matrix_sampled_minmax dim:", dim(spectra_matrix_sampled_minmax), "\n")
+cat("freq_focus length:", length(freq_focus), "\n")
+
+cat("\nUMAP analyses available:\n")
+print(unique(umap_results_all$Analysis))
+
+cat("\nHDBSCAN analyses available:\n")
+print(unique(hdbscan_results_all$Analysis))
+
+```
+
+------------------------------------------------------
+
+## HDBSCAN Tuning
+
+## HDBSCAN Tuning Output Folder
+
+```{r}
+
+tuning_dir <- file.path(
+  output_dir,
+  "HDBSCAN_Tuning_Safe"
+)
+
+tuning_plot_dir <- file.path(
+  tuning_dir,
+  "plots"
+)
+
+tuning_table_dir <- file.path(
+  tuning_dir,
+  "tables"
+)
+
+tuning_data_dir <- file.path(
+  tuning_dir,
+  "data"
+)
+
+dir.create(tuning_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tuning_plot_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tuning_table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tuning_data_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Created safe tuning folder:\n")
+cat(tuning_dir)
+
+```
+
+## HDBSCAN Tuning — 5PC + scaled logICI
+
+```{r}
+
+# ------------------------------------------------------------
+# minPts values to test
+# ------------------------------------------------------------
+
+minPts_values <- c(10, 30, 50)
+
+# ------------------------------------------------------------
+# Pull only the primary joint spectral-temporal analysis
+# ------------------------------------------------------------
+
+umap_5pc_logici <- umap_results_all %>%
+  filter(Analysis == "5PC_plus_scaled_logICI")
+
+cat("Rows in 5PC + scaled logICI UMAP:\n")
+print(nrow(umap_5pc_logici))
+
+# ------------------------------------------------------------
+# Extract UMAP coordinates
+# ------------------------------------------------------------
+
+umap_matrix <- umap_5pc_logici %>%
+  select(UMAP1, UMAP2) %>%
+  as.matrix()
+
+# ------------------------------------------------------------
+# Run HDBSCAN for each minPts value
+# ------------------------------------------------------------
+
+hdbscan_tuning_results <- list()
+
+for (m in minPts_values) {
+  
+  cat("\n============================\n")
+  cat("Running HDBSCAN with minPts =", m, "\n")
+  cat("============================\n")
+  
+  hdb <- dbscan::hdbscan(
+    umap_matrix,
+    minPts = m
+  )
+  
+  result_df <- umap_5pc_logici %>%
+    mutate(
+      HDBSCAN_cluster = factor(hdb$cluster),
+      HDBSCAN_membership_probability = hdb$membership_prob,
+      minPts = m
+    )
+  
+  cluster_summary <- result_df %>%
+    count(HDBSCAN_cluster, name = "n_clicks") %>%
+    mutate(
+      percent_clicks = 100 * n_clicks / sum(n_clicks),
+      cluster_type = if_else(
+        HDBSCAN_cluster == "0",
+        "noise_unassigned",
+        "cluster"
+      )
+    ) %>%
+    arrange(desc(n_clicks))
+  
+  cat("\nCluster summary:\n")
+  print(cluster_summary)
+  
+  hdbscan_tuning_results[[paste0("minPts_", m)]] <- result_df
+  
+  # --------------------------------------------------------
+  # Save summary table
+  # --------------------------------------------------------
+  
+  write.csv(
+    cluster_summary,
+    file.path(
+      tuning_table_dir,
+      paste0("hdbscan_summary_minPts_", m, ".csv")
+    ),
+    row.names = FALSE
+  )
+}
+
+cat("\nPASS: HDBSCAN tuning runs complete.\n")
+
+```
+
+## Compare HDBSCAN UMAP Clusters Across minPts
+
+```{r}
+
+# ------------------------------------------------------------
+# Combine tuning outputs into one dataframe
+# ------------------------------------------------------------
+
+hdbscan_tuning_combined <- bind_rows(hdbscan_tuning_results)
+
+cat("Rows in combined tuning dataframe:\n")
+print(nrow(hdbscan_tuning_combined))
+
+cat("\nminPts values present:\n")
+print(unique(hdbscan_tuning_combined$minPts))
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+p_hdbscan_tuning_compare <- ggplot(
+  hdbscan_tuning_combined,
+  aes(
+    x = UMAP1,
+    y = UMAP2,
+    color = HDBSCAN_cluster
+  )
+) +
+  geom_point(
+    size = 0.4,
+    alpha = 0.7
+  ) +
+  facet_wrap(
+    ~ minPts,
+    nrow = 1
+  ) +
+  labs(
+    title = "HDBSCAN Cluster Comparison Across minPts Values",
+    subtitle = "5PC + scaled logICI analysis",
+    x = "UMAP1",
+    y = "UMAP2",
+    color = "HDBSCAN\ncluster"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_hdbscan_tuning_compare)
+
+# ------------------------------------------------------------
+# Save
+# ------------------------------------------------------------
+
+ggsave(
+  filename = file.path(
+    tuning_plot_dir,
+    "hdbscan_umap_compare_minPts_10_30_50.png"
+  ),
+  plot = p_hdbscan_tuning_compare,
+  width = 18,
+  height = 6,
+  dpi = 300
+)
+
+cat("\nSaved HDBSCAN comparison plot.\n")
+
+```
+
+## Clean Comparison — minPts 30 vs 50
+
+```{r}
+
+# ------------------------------------------------------------
+# Prepare plotting data
+# ------------------------------------------------------------
+
+plot_30_50 <- hdbscan_tuning_combined %>%
+  filter(minPts %in% c(30, 50)) %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+p_30_50_compare <- ggplot(
+  plot_30_50,
+  aes(
+    x = UMAP1,
+    y = UMAP2,
+    color = HDBSCAN_cluster
+  )
+) +
+  geom_point(
+    size = 0.4,
+    alpha = 0.75
+  ) +
+  facet_wrap(
+    ~ minPts,
+    nrow = 1
+  ) +
+  
+  # --------------------------------------------------------
+  # Manual colors preserving cluster labels
+  # --------------------------------------------------------
+  
+  scale_color_manual(
+    values = c(
+      
+      # shared
+      "0" = "grey80",
+      
+      # minPts = 30 major clusters
+      "4" = "#17A8E3",  # blue/right
+      "5" = "#8E63CE",  # purple/upper
+      "6" = "#F15BB5",  # pink/lower
+      
+      # minPts = 30 minor clusters
+      "1" = "#C49A00",
+      "2" = "#4CAF50",
+      "3" = "#2EC4B6",
+      
+      # minPts = 50 major clusters
+      "2" = "#17A8E3",  # blue/right
+      "3" = "#8E63CE",  # purple/upper
+      "4" = "#F15BB5",  # pink/lower
+      
+      # minPts = 50 minor
+      "1" = "#2EC4B6"
+    )
+  ) +
+  
+  labs(
+    title = "HDBSCAN Cluster Stability Across Density Thresholds",
+    subtitle = "5PC + scaled logICI analysis",
+    x = "UMAP1",
+    y = "UMAP2",
+    color = "HDBSCAN\ncluster"
+  ) +
+  
+  theme_bw(base_size = 13)
+
+print(p_30_50_compare)
+
+# ------------------------------------------------------------
+# Save
+# ------------------------------------------------------------
+
+ggsave(
+  filename = file.path(
+    tuning_plot_dir,
+    "hdbscan_compare_minPts30_vs_50_clusterIDs.png"
+  ),
+  plot = p_30_50_compare,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+```
+
+## Compare ICI Distributions — minPts 30 vs 50
+
+```{r}
+
+# ------------------------------------------------------------
+# Build stable region labels
+# ------------------------------------------------------------
+
+plot_30_50 <- hdbscan_tuning_combined %>%
+  filter(minPts %in% c(30, 50)) %>%
+  mutate(
+    
+    PlotCluster = case_when(
+      
+      # minPts = 30
+      minPts == 30 & HDBSCAN_cluster == "5" ~ "Upper region",
+      minPts == 30 & HDBSCAN_cluster == "4" ~ "Right region",
+      minPts == 30 & HDBSCAN_cluster == "6" ~ "Lower region",
+      
+      # minPts = 50
+      minPts == 50 & HDBSCAN_cluster == "3" ~ "Upper region",
+      minPts == 50 & HDBSCAN_cluster == "2" ~ "Right region",
+      minPts == 50 & HDBSCAN_cluster == "4" ~ "Lower region",
+      
+      # noise
+      HDBSCAN_cluster == "0" ~ "Noise / unassigned",
+      
+      # everything else
+      TRUE ~ "Minor clusters"
+    )
+  )
+
+# ------------------------------------------------------------
+# Keep only major stable regions
+# ------------------------------------------------------------
+
+ici_compare_df <- plot_30_50 %>%
+  filter(
+    PlotCluster %in% c(
+      "Upper region",
+      "Right region",
+      "Lower region"
+    )
+  )
+
+cat("Rows in ICI comparison dataframe:\n")
+print(nrow(ici_compare_df))
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+p_ici_compare <- ggplot(
+  ici_compare_df,
+  aes(
+    x = PlotCluster,
+    y = ICI_to_next_s,
+    fill = PlotCluster
+  )
+) +
+  
+  geom_boxplot(
+    outlier.size = 0.4,
+    alpha = 0.8
+  ) +
+  
+  facet_wrap(
+    ~ minPts,
+    nrow = 1
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "Upper region" = "#8E63CE",
+      "Right region" = "#17A8E3",
+      "Lower region" = "#F15BB5"
+    )
+  ) +
+  
+  scale_y_log10() +
+  
+  labs(
+    title = "ICI Distributions Across HDBSCAN Density Thresholds",
+    subtitle = "Major spectral-temporal regions remain temporally distinct",
+    x = NULL,
+    y = "ICI (seconds, log scale)",
+    fill = NULL
+  ) +
+  
+  theme_bw(base_size = 13)
+
+print(p_ici_compare)
+
+# ------------------------------------------------------------
+# Save
+# ------------------------------------------------------------
+
+ggsave(
+  filename = file.path(
+    tuning_plot_dir,
+    "ici_boxplot_compare_minPts30_vs_50.png"
+  ),
+  plot = p_ici_compare,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+```
+
+## Compare Mean Spectra — minPts 30 vs 50
+
+```{r}
+
+# ------------------------------------------------------------
+# Keep non-noise clusters only
+# ------------------------------------------------------------
+
+spectra_compare_clusters <- hdbscan_tuning_combined %>%
+  filter(
+    minPts %in% c(30, 50),
+    HDBSCAN_cluster != "0"
+  )
+
+# ------------------------------------------------------------
+# Match spectra rows
+# ------------------------------------------------------------
+
+spectra_matrix_compare <- spectra_matrix_sampled_minmax[
+  match(
+    spectra_compare_clusters$UID,
+    sampled_clicks_with_pcs$UID
+  ),
+]
+
+# ------------------------------------------------------------
+# Convert spectra to long format
+# ------------------------------------------------------------
+
+spectra_long_compare <- as.data.frame(
+  spectra_matrix_compare
+)
+
+colnames(spectra_long_compare) <- paste0(
+  "Freq_",
+  seq_len(ncol(spectra_long_compare))
+)
+
+spectra_long_compare$UID <- spectra_compare_clusters$UID
+spectra_long_compare$HDBSCAN_cluster <- spectra_compare_clusters$HDBSCAN_cluster
+spectra_long_compare$minPts <- spectra_compare_clusters$minPts
+
+spectra_long_compare <- spectra_long_compare %>%
+  pivot_longer(
+    cols = starts_with("Freq_"),
+    names_to = "FreqIndex",
+    values_to = "Amplitude"
+  ) %>%
+  mutate(
+    FreqIndex = as.numeric(
+      gsub("Freq_", "", FreqIndex)
+    ),
+    Frequency_kHz = freq_focus[FreqIndex] / 1000
+  )
+
+# ------------------------------------------------------------
+# Mean spectra
+# ------------------------------------------------------------
+
+mean_spectra_compare <- spectra_long_compare %>%
+  group_by(
+    minPts,
+    HDBSCAN_cluster,
+    Frequency_kHz
+  ) %>%
+  summarise(
+    MeanAmplitude = mean(
+      Amplitude,
+      na.rm = TRUE
+    ),
+    SDAmplitude = sd(
+      Amplitude,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+p_spectra_cluster_compare <- ggplot(
+  mean_spectra_compare,
+  aes(
+    x = Frequency_kHz,
+    y = MeanAmplitude
+  )
+) +
+  
+  geom_ribbon(
+    aes(
+      ymin = MeanAmplitude - SDAmplitude,
+      ymax = MeanAmplitude + SDAmplitude
+    ),
+    fill = "grey70",
+    alpha = 0.5
+  ) +
+  
+  geom_line(
+    linewidth = 1.2,
+    color = "black"
+  ) +
+  
+  facet_grid(
+    minPts ~ HDBSCAN_cluster
+  ) +
+  
+  labs(
+    title = "Mean Spectra with Variability by HDBSCAN Cluster",
+    subtitle = "Comparison across minPts = 30 and 50",
+    x = "Frequency (kHz)",
+    y = "Min-max normalized amplitude"
+  ) +
+  
+  theme_bw(base_size = 13)
+
+print(p_spectra_cluster_compare)
+
+# ------------------------------------------------------------
+# Save
+# ------------------------------------------------------------
+
+ggsave(
+  filename = file.path(
+    tuning_plot_dir,
+    "mean_spectra_compare_clusters_minPts30_vs_50.png"
+  ),
+  plot = p_spectra_cluster_compare,
+  width = 16,
+  height = 8,
+  dpi = 300
+)
+
+```
+
+------------------------------------------------------
+# minPts = 50 Outputs
+
+## Export Main HDBSCAN Result — minPts = 50
+
+```{r}
+
+# ------------------------------------------------------------
+# Output folders for selected minPts = 50 result
+# ------------------------------------------------------------
+
+minpts50_dir <- file.path(output_dir, "Main_minPts50_5PC_scaled_logICI")
+minpts50_data_dir <- file.path(minpts50_dir, "data")
+minpts50_table_dir <- file.path(minpts50_dir, "tables")
+minpts50_plot_dir <- file.path(minpts50_dir, "plots")
+
+dir.create(minpts50_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(minpts50_data_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(minpts50_table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(minpts50_plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Pull minPts = 50 cluster assignments
+# ------------------------------------------------------------
+
+hdbscan_minpts50_assignments <- hdbscan_tuning_combined %>%
+  filter(minPts == 50) %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    HDBSCAN_cluster_type = if_else(
+      HDBSCAN_cluster == "0",
+      "noise_unassigned",
+      "cluster"
+    )
+  ) %>%
+  select(
+    EventID,
+    DriftID_spectra,
+    UID,
+    RowID,
+    UMAP1,
+    UMAP2,
+    minPts,
+    HDBSCAN_cluster,
+    HDBSCAN_cluster_type,
+    HDBSCAN_membership_probability,
+    ICI_to_next_s,
+    log10_ICI_to_next_s,
+    scaled_log10_ICI,
+    starts_with("PC")
+  )
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("Rows in minPts = 50 assignment table:\n")
+print(nrow(hdbscan_minpts50_assignments))
+
+cat("\nUnique clusters:\n")
+print(sort(unique(hdbscan_minpts50_assignments$HDBSCAN_cluster)))
+
+cat("\nCluster counts:\n")
+print(table(hdbscan_minpts50_assignments$HDBSCAN_cluster))
+
+# ------------------------------------------------------------
+# Save assignment table
+# ------------------------------------------------------------
+
+saveRDS(
+  hdbscan_minpts50_assignments,
+  file.path(minpts50_data_dir, "hdbscan_minPts50_click_assignments.rds")
+)
+
+write.csv(
+  hdbscan_minpts50_assignments,
+  file.path(minpts50_table_dir, "hdbscan_minPts50_click_assignments.csv"),
+  row.names = FALSE
+)
+
+cat("\nSaved minPts = 50 click-level assignments to:\n")
+cat(minpts50_dir, "\n")
+
+```
+
+## Cluster Size and ICI Summary — minPts = 50
+
+```{r}
+
+# ------------------------------------------------------------
+# Cluster size / percent summary
+# ------------------------------------------------------------
+
+hdbscan_minpts50_cluster_summary <- hdbscan_minpts50_assignments %>%
+  count(
+    HDBSCAN_cluster,
+    HDBSCAN_cluster_type,
+    name = "n_clicks"
+  ) %>%
+  mutate(
+    percent_clicks = 100 * n_clicks / sum(n_clicks)
+  ) %>%
+  arrange(
+    HDBSCAN_cluster_type,
+    desc(n_clicks)
+  )
+
+print(hdbscan_minpts50_cluster_summary)
+
+write.csv(
+  hdbscan_minpts50_cluster_summary,
+  file.path(minpts50_table_dir, "hdbscan_minPts50_cluster_summary.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# ICI summary by cluster
+# ------------------------------------------------------------
+
+hdbscan_minpts50_ici_summary <- hdbscan_minpts50_assignments %>%
+  group_by(
+    HDBSCAN_cluster,
+    HDBSCAN_cluster_type
+  ) %>%
+  summarise(
+    n_clicks = n(),
+    median_ici_s = median(ICI_to_next_s, na.rm = TRUE),
+    mean_ici_s = mean(ICI_to_next_s, na.rm = TRUE),
+    sd_ici_s = sd(ICI_to_next_s, na.rm = TRUE),
+    q25_ici_s = quantile(ICI_to_next_s, 0.25, na.rm = TRUE),
+    q75_ici_s = quantile(ICI_to_next_s, 0.75, na.rm = TRUE),
+    min_ici_s = min(ICI_to_next_s, na.rm = TRUE),
+    max_ici_s = max(ICI_to_next_s, na.rm = TRUE),
+    n_events = n_distinct(EventID),
+    n_drifts = n_distinct(DriftID_spectra),
+    .groups = "drop"
+  ) %>%
+  arrange(
+    HDBSCAN_cluster_type,
+    desc(n_clicks)
+  )
+
+print(hdbscan_minpts50_ici_summary)
+
+write.csv(
+  hdbscan_minpts50_ici_summary,
+  file.path(minpts50_table_dir, "hdbscan_minPts50_ici_summary_by_cluster.csv"),
+  row.names = FALSE
+)
+
+cat("\nSaved cluster and ICI summary tables.\n")
+
+```
+
+## Generate Main minPts = 50 Tables and Plots
+
+```{r}
+
+# ------------------------------------------------------------
+# Frequency grid safety
+# ------------------------------------------------------------
+
+freq_plot_khz <- if (max(freq_focus, na.rm = TRUE) > 1000) {
+  freq_focus / 1000
+} else {
+  freq_focus
+}
+
+# ------------------------------------------------------------
+# Colors for minPts = 50 clusters
+# 0 = noise/unassigned
+# ------------------------------------------------------------
+
+cluster_colors_50 <- c(
+  "0" = "#F8766D",
+  "1" = "#C49A00",
+  "2" = "#53B400",
+  "3" = "#00C1A2",
+  "4" = "#00A9E0"
+)
+
+# ------------------------------------------------------------
+# Build long spectra table for minPts = 50 assignments
+# ------------------------------------------------------------
+
+sampled_key <- sampled_clicks_with_pcs %>%
+  mutate(
+    spectrum_row = row_number(),
+    UID = as.character(UID)
+  ) %>%
+  select(EventID, UID, spectrum_row)
+
+assignments_with_spectrum_row <- hdbscan_minpts50_assignments %>%
+  mutate(UID = as.character(UID)) %>%
+  left_join(sampled_key, by = c("EventID", "UID"))
+
+if (any(is.na(assignments_with_spectrum_row$spectrum_row))) {
+  stop("Some minPts = 50 assignments could not be matched to spectra rows.")
+}
+
+spectra_minpts50_matrix <- spectra_matrix_sampled_minmax[
+  assignments_with_spectrum_row$spectrum_row,
+  ,
+  drop = FALSE
+]
+
+spectra_minpts50_long <- as.data.frame(spectra_minpts50_matrix)
+
+colnames(spectra_minpts50_long) <- paste0("Freq_", seq_len(ncol(spectra_minpts50_long)))
+
+spectra_minpts50_long <- spectra_minpts50_long %>%
+  mutate(
+    EventID = assignments_with_spectrum_row$EventID,
+    DriftID_spectra = assignments_with_spectrum_row$DriftID_spectra,
+    UID = assignments_with_spectrum_row$UID,
+    HDBSCAN_cluster = assignments_with_spectrum_row$HDBSCAN_cluster,
+    HDBSCAN_cluster_type = assignments_with_spectrum_row$HDBSCAN_cluster_type
+  ) %>%
+  pivot_longer(
+    cols = starts_with("Freq_"),
+    names_to = "FreqIndex",
+    values_to = "Amplitude"
+  ) %>%
+  mutate(
+    FreqIndex = as.integer(gsub("Freq_", "", FreqIndex)),
+    Frequency_kHz = freq_plot_khz[FreqIndex]
+  )
+
+mean_spectra_minpts50 <- spectra_minpts50_long %>%
+  group_by(HDBSCAN_cluster, HDBSCAN_cluster_type, Frequency_kHz) %>%
+  summarise(
+    mean_minmax_spectrum = mean(Amplitude, na.rm = TRUE),
+    sd_minmax_spectrum = sd(Amplitude, na.rm = TRUE),
+    n_clicks = n_distinct(paste(EventID, UID)),
+    .groups = "drop"
+  )
+
+write.csv(
+  mean_spectra_minpts50,
+  file.path(minpts50_table_dir, "hdbscan_minPts50_mean_spectra_by_cluster.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# 1. UMAP cluster plot
+# ------------------------------------------------------------
+
+p_umap_minpts50 <- ggplot(
+  hdbscan_minpts50_assignments,
+  aes(x = UMAP1, y = UMAP2, color = HDBSCAN_cluster)
+) +
+  geom_point(size = 0.5, alpha = 0.65) +
+  scale_color_manual(values = cluster_colors_50) +
+  labs(
+    title = "HDBSCAN Clusters: 5PC + 1x scaled logICI",
+    subtitle = "minPts = 50; Cluster 0 = noise/unassigned",
+    x = "UMAP1",
+    y = "UMAP2",
+    color = "HDBSCAN\ncluster"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_umap_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_umap_clusters.png"),
+  p_umap_minpts50,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# 2. ICI boxplot
+# ------------------------------------------------------------
+
+p_ici_minpts50 <- ggplot(
+  hdbscan_minpts50_assignments,
+  aes(x = HDBSCAN_cluster, y = ICI_to_next_s, fill = HDBSCAN_cluster)
+) +
+  geom_boxplot(outlier.size = 0.3) +
+  scale_fill_manual(values = cluster_colors_50) +
+  scale_y_log10() +
+  labs(
+    title = "ICI Distribution by HDBSCAN Cluster",
+    subtitle = "5PC + 1x scaled logICI; minPts = 50",
+    x = "HDBSCAN cluster",
+    y = "ICI (seconds, log scale)",
+    fill = "HDBSCAN\ncluster"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_ici_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_ici_boxplot_by_cluster.png"),
+  p_ici_minpts50,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# 3. Mean spectra, all clusters together
+# ------------------------------------------------------------
+
+p_mean_spectra_all_minpts50 <- ggplot(
+  mean_spectra_minpts50,
+  aes(
+    x = Frequency_kHz,
+    y = mean_minmax_spectrum,
+    color = HDBSCAN_cluster,
+    group = HDBSCAN_cluster
+  )
+) +
+  geom_line(linewidth = 1.1) +
+  scale_color_manual(values = cluster_colors_50) +
+  labs(
+    title = "Mean Min-Max Normalized Spectra by HDBSCAN Cluster",
+    subtitle = "5PC + 1x scaled logICI; minPts = 50; cluster 0 = noise/unassigned",
+    x = "Frequency (kHz)",
+    y = "Mean min-max normalized amplitude",
+    color = "HDBSCAN\ncluster"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_mean_spectra_all_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_mean_spectra_all_clusters.png"),
+  p_mean_spectra_all_minpts50,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# 4. Mean spectra faceted
+# ------------------------------------------------------------
+
+p_mean_spectra_faceted_minpts50 <- ggplot(
+  mean_spectra_minpts50,
+  aes(x = Frequency_kHz, y = mean_minmax_spectrum)
+) +
+  geom_line(linewidth = 1.1, color = "black") +
+  facet_wrap(~ HDBSCAN_cluster, ncol = 2) +
+  labs(
+    title = "Mean Min-Max Normalized Spectra by HDBSCAN Cluster",
+    subtitle = "Faceted by cluster; minPts = 50; cluster 0 = noise/unassigned",
+    x = "Frequency (kHz)",
+    y = "Mean min-max normalized amplitude"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_mean_spectra_faceted_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_mean_spectra_faceted.png"),
+  p_mean_spectra_faceted_minpts50,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# 5. Mean spectra with SD ribbons, noise excluded
+# ------------------------------------------------------------
+
+p_mean_spectra_sd_minpts50 <- mean_spectra_minpts50 %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  ggplot(aes(x = Frequency_kHz, y = mean_minmax_spectrum)) +
+  geom_ribbon(
+    aes(
+      ymin = mean_minmax_spectrum - sd_minmax_spectrum,
+      ymax = mean_minmax_spectrum + sd_minmax_spectrum
+    ),
+    fill = "grey70",
+    alpha = 0.55
+  ) +
+  geom_line(linewidth = 1.1, color = "black") +
+  facet_wrap(~ HDBSCAN_cluster, ncol = 2) +
+  labs(
+    title = "Mean Spectra with Variability by HDBSCAN Cluster",
+    subtitle = "Mean ± 1 SD; 5PC + 1x scaled logICI; minPts = 50; noise excluded",
+    x = "Frequency (kHz)",
+    y = "Min-max normalized amplitude"
+  ) +
+  theme_bw(base_size = 13)
+
+print(p_mean_spectra_sd_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_mean_spectra_with_sd_ribbons_noise_excluded.png"),
+  p_mean_spectra_sd_minpts50,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# 6. Stacked mean spectra, noise excluded
+# ------------------------------------------------------------
+
+stacked_spectra_minpts50 <- mean_spectra_minpts50 %>%
+  mutate(
+    cluster_numeric = as.numeric(HDBSCAN_cluster),
+    stacked_spectrum = mean_minmax_spectrum + cluster_numeric
+  )
+
+p_stacked_no_noise_minpts50 <- stacked_spectra_minpts50 %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  ggplot(
+    aes(
+      x = Frequency_kHz,
+      y = stacked_spectrum,
+      color = HDBSCAN_cluster,
+      group = HDBSCAN_cluster
+    )
+  ) +
+  geom_line(linewidth = 1.2) +
+  scale_color_manual(values = cluster_colors_50) +
+  scale_y_continuous(
+    breaks = sort(unique(stacked_spectra_minpts50$cluster_numeric)),
+    labels = sort(unique(stacked_spectra_minpts50$HDBSCAN_cluster))
+  ) +
+  labs(
+    title = "Stacked Mean Spectra by HDBSCAN Cluster",
+    subtitle = "5PC + 1x scaled logICI; minPts = 50; noise cluster removed",
+    x = "Frequency (kHz)",
+    y = "HDBSCAN cluster"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "none")
+
+print(p_stacked_no_noise_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_stacked_mean_spectra_no_noise.png"),
+  p_stacked_no_noise_minpts50,
+  width = 4,
+  height = 7,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# 7. Drift composition table and plot
+# ------------------------------------------------------------
+
+drift_composition_minpts50 <- hdbscan_minpts50_assignments %>%
+  count(HDBSCAN_cluster, DriftID_spectra, name = "n_clicks") %>%
+  group_by(HDBSCAN_cluster) %>%
+  mutate(percent_within_cluster = 100 * n_clicks / sum(n_clicks)) %>%
+  ungroup() %>%
+  arrange(HDBSCAN_cluster, desc(n_clicks))
+
+write.csv(
+  drift_composition_minpts50,
+  file.path(minpts50_table_dir, "hdbscan_minPts50_drift_composition_by_cluster.csv"),
+  row.names = FALSE
+)
+
+top_drifts_minpts50 <- drift_composition_minpts50 %>%
+  group_by(HDBSCAN_cluster) %>%
+  slice_max(n_clicks, n = 5, with_ties = FALSE) %>%
+  ungroup()
+
+p_top_drifts_minpts50 <- ggplot(
+  top_drifts_minpts50,
+  aes(
+    x = n_clicks,
+    y = reorder(DriftID_spectra, n_clicks),
+    fill = HDBSCAN_cluster
+  )
+) +
+  geom_col() +
+  facet_wrap(~ HDBSCAN_cluster, scales = "free", ncol = 3) +
+  scale_fill_manual(values = cluster_colors_50) +
+  labs(
+    title = "Top Contributing Drifts per HDBSCAN Cluster",
+    subtitle = "5PC + 1x scaled logICI; minPts = 50",
+    x = "Number of clicks",
+    y = "DriftID"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "none")
+
+print(p_top_drifts_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_top_drifts_per_cluster.png"),
+  p_top_drifts_minpts50,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# 8. Event composition table and plot
+# ------------------------------------------------------------
+
+event_composition_minpts50 <- hdbscan_minpts50_assignments %>%
+  count(HDBSCAN_cluster, EventID, name = "n_clicks") %>%
+  group_by(HDBSCAN_cluster) %>%
+  mutate(percent_within_cluster = 100 * n_clicks / sum(n_clicks)) %>%
+  ungroup() %>%
+  arrange(HDBSCAN_cluster, desc(n_clicks))
+
+write.csv(
+  event_composition_minpts50,
+  file.path(minpts50_table_dir, "hdbscan_minPts50_event_composition_by_cluster.csv"),
+  row.names = FALSE
+)
+
+top_events_minpts50 <- event_composition_minpts50 %>%
+  group_by(HDBSCAN_cluster) %>%
+  slice_max(n_clicks, n = 5, with_ties = FALSE) %>%
+  ungroup()
+
+p_top_events_minpts50 <- ggplot(
+  top_events_minpts50,
+  aes(
+    x = n_clicks,
+    y = reorder(EventID, n_clicks),
+    fill = HDBSCAN_cluster
+  )
+) +
+  geom_col() +
+  facet_wrap(~ HDBSCAN_cluster, scales = "free", ncol = 3) +
+  scale_fill_manual(values = cluster_colors_50) +
+  labs(
+    title = "Top Contributing Events per HDBSCAN Cluster",
+    subtitle = "5PC + 1x scaled logICI; minPts = 50",
+    x = "Number of clicks",
+    y = "EventID"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "none")
+
+print(p_top_events_minpts50)
+
+ggsave(
+  file.path(minpts50_plot_dir, "hdbscan_minPts50_top_events_per_cluster.png"),
+  p_top_events_minpts50,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+cat("\nSaved all minPts = 50 plots and tables to:\n")
+cat(minpts50_dir, "\n")
+
+```
+
+--------------------------------------------------
+
+# Map HDBSCAN cluster composition by event
+
+## Setup
+
+```{r}
+
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(scatterpie)
+library(tidyr)
+library(stringr)
+
+# ------------------------------------------------------------
+# Input: drift/event latitude-longitude table
+# ------------------------------------------------------------
+
+adrift_detection_file <- "E:/Logs/ADRIFT_GgDetections.csv"
+
+adrift_detections <- read_csv(adrift_detection_file, show_col_types = FALSE)
+
+cat("Columns in ADRIFT_GgDetections:\n")
+print(names(adrift_detections))
+
+```
+
+## Inspect location file contents
+
+```{r}
+
+cat("Rows in location file:", nrow(adrift_detections), "\n\n")
+
+cat("Unique DriftName prefixes:\n")
+print(
+  adrift_detections %>%
+    mutate(DriftPrefix = stringr::str_extract(DriftName, "^[^_]+")) %>%
+    count(DriftPrefix, name = "n_rows") %>%
+    arrange(DriftPrefix)
+)
+
+cat("\nUnique EventID prefixes:\n")
+print(
+  adrift_detections %>%
+    mutate(EventPrefix = stringr::str_extract(EventID, "^[^_]+")) %>%
+    count(EventPrefix, name = "n_rows") %>%
+    arrange(EventPrefix)
+)
+
+cat("\nPreview across all drift types:\n")
+print(
+  adrift_detections %>%
+    select(DriftName, EventID, Latitude, Longitude) %>%
+    arrange(DriftName, EventID) %>%
+    group_by(stringr::str_extract(DriftName, "^[^_]+")) %>%
+    slice_head(n = 5) %>%
+    ungroup()
+)
+
+```
+
+## Sanity check: events and click counts used in final HDBSCAN
+
+```{r}
+
+hdbscan_event_click_counts <- hdbscan_minpts50_assignments %>%
+  mutate(
+    EventID = as.character(EventID),
+    DriftID = stringr::str_remove(EventID, "_[0-9]+$"),
+    EventPrefix = stringr::str_extract(EventID, "^[^_]+")
+  ) %>%
+  count(EventPrefix, DriftID, EventID, name = "n_clicks_used") %>%
+  arrange(EventPrefix, DriftID, EventID)
+
+cat("Total clicks in final HDBSCAN object:", sum(hdbscan_event_click_counts$n_clicks_used), "\n")
+cat("Unique events used:", nrow(hdbscan_event_click_counts), "\n")
+cat("Unique drifts used:", n_distinct(hdbscan_event_click_counts$DriftID), "\n\n")
+
+cat("Events by prefix:\n")
+print(
+  hdbscan_event_click_counts %>%
+    count(EventPrefix, name = "n_events")
+)
+
+cat("\nClick-count summary per event:\n")
+print(summary(hdbscan_event_click_counts$n_clicks_used))
+
+cat("\nFull event click-count table:\n")
+print(hdbscan_event_click_counts, n = Inf)
+
+```
+
+##  Match final HDBSCAN events to location file using cleaned EventID
+
+```{r}
+
+hdbscan_event_click_counts_clean <- hdbscan_event_click_counts %>%
+  mutate(
+    EventID_clean = stringr::str_replace(EventID, "_Event_", "_"),
+    DriftID_clean = stringr::str_remove(EventID_clean, "_[0-9]+$")
+  )
+
+event_locations <- adrift_detections %>%
+  mutate(
+    EventID_clean = as.character(EventID),
+    Latitude = as.numeric(Latitude),
+    Longitude = as.numeric(Longitude)
+  ) %>%
+  filter(
+    !is.na(EventID_clean),
+    !is.na(Latitude),
+    !is.na(Longitude)
+  ) %>%
+  select(EventID_clean, DriftName, Latitude, Longitude)
+
+hdbscan_events_with_locations <- hdbscan_event_click_counts_clean %>%
+  left_join(event_locations, by = "EventID_clean")
+
+cat("HDBSCAN events:", nrow(hdbscan_event_click_counts_clean), "\n")
+cat("Matched location rows:", sum(!is.na(hdbscan_events_with_locations$Latitude)), "\n")
+cat("Missing location rows:", sum(is.na(hdbscan_events_with_locations$Latitude)), "\n\n")
+
+cat("Missing events, if any:\n")
+print(
+  hdbscan_events_with_locations %>%
+    filter(is.na(Latitude) | is.na(Longitude))
+)
+
+cat("\nMatched event coordinate preview:\n")
+print(hdbscan_events_with_locations, n = Inf)
+
+```
+
+## Build event-level cluster composition tables
+
+```{r}
+
+event_cluster_counts <- hdbscan_minpts50_assignments %>%
+  mutate(
+    EventID = as.character(EventID),
+    EventID_clean = stringr::str_replace(EventID, "_Event_", "_"),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  ) %>%
+  count(EventID, EventID_clean, HDBSCAN_cluster, name = "n_clicks") %>%
+  left_join(
+    hdbscan_events_with_locations %>%
+      select(EventID, EventID_clean, DriftName, Latitude, Longitude),
+    by = c("EventID", "EventID_clean")
+  )
+
+cat("Rows in event-cluster count table:", nrow(event_cluster_counts), "\n")
+cat("Unique mapped events:", n_distinct(event_cluster_counts$EventID), "\n")
+cat("Total clicks represented:", sum(event_cluster_counts$n_clicks), "\n\n")
+
+cat("Cluster composition preview:\n")
+print(head(event_cluster_counts, 30))
+
+```
+
+## Create wide pie-map tables
+
+```{r}
+
+event_pies_including_noise <- event_cluster_counts %>%
+  select(EventID, EventID_clean, DriftName, Latitude, Longitude, HDBSCAN_cluster, n_clicks) %>%
+  tidyr::pivot_wider(
+    names_from = HDBSCAN_cluster,
+    values_from = n_clicks,
+    values_fill = 0,
+    names_prefix = "cluster_"
+  )
+
+event_pies_excluding_noise <- event_cluster_counts %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  select(EventID, EventID_clean, DriftName, Latitude, Longitude, HDBSCAN_cluster, n_clicks) %>%
+  tidyr::pivot_wider(
+    names_from = HDBSCAN_cluster,
+    values_from = n_clicks,
+    values_fill = 0,
+    names_prefix = "cluster_"
+  )
+
+cat("Including noise: events =", nrow(event_pies_including_noise), "\n")
+cat("Excluding noise: events =", nrow(event_pies_excluding_noise), "\n\n")
+
+cat("Including noise columns:\n")
+print(names(event_pies_including_noise))
+
+cat("\nExcluding noise columns:\n")
+print(names(event_pies_excluding_noise))
+
+cat("\nPreview including noise:\n")
+print(head(event_pies_including_noise, 10))
+
+cat("\nPreview excluding noise:\n")
+print(head(event_pies_excluding_noise, 10))
+
+```
+
+## Add pie radius and save map-ready tables
+
+```{r}
+
+# ------------------------------------------------------------
+# Output folders
+# ------------------------------------------------------------
+
+map_output_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/minPts50_event_cluster_maps"
+
+map_plot_dir <- file.path(map_output_dir, "plots")
+map_table_dir <- file.path(map_output_dir, "tables")
+
+dir.create(map_plot_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(map_table_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Add pie radius
+# ------------------------------------------------------------
+
+add_pie_radius <- function(df) {
+  
+  cluster_cols <- names(df)[stringr::str_detect(names(df), "^cluster_")]
+  
+  df %>%
+    mutate(
+      total_clicks_mapped = rowSums(across(all_of(cluster_cols))),
+      pie_radius = sqrt(total_clicks_mapped) /
+        max(sqrt(total_clicks_mapped), na.rm = TRUE) * 0.55
+    )
+}
+
+event_pies_including_noise <- add_pie_radius(event_pies_including_noise)
+
+event_pies_excluding_noise <- add_pie_radius(event_pies_excluding_noise)
+
+# ------------------------------------------------------------
+# Save tables
+# ------------------------------------------------------------
+
+write.csv(
+  event_pies_including_noise,
+  file.path(
+    map_table_dir,
+    "event_pie_map_data_including_noise.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  event_pies_excluding_noise,
+  file.path(
+    map_table_dir,
+    "event_pie_map_data_excluding_noise.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("Including-noise total clicks:",
+    sum(event_pies_including_noise$total_clicks_mapped), "\n")
+
+cat("Excluding-noise total clicks:",
+    sum(event_pies_excluding_noise$total_clicks_mapped), "\n\n")
+
+cat("Pie radius summary including noise:\n")
+print(summary(event_pies_including_noise$pie_radius))
+
+cat("\nPie radius summary excluding noise:\n")
+print(summary(event_pies_excluding_noise$pie_radius))
+
+cat("\nSaved map-ready tables to:\n")
+cat(map_table_dir, "\n")
+
+```
+
+## Build California Current basemap and pie-map function
+
+```{r}
+
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+
+make_event_pie_map <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  xlim <- range(pie_data$Longitude, na.rm = TRUE) + c(-1.5, 1.5)
+  ylim <- range(pie_data$Latitude, na.rm = TRUE) + c(-1.5, 1.5)
+  
+  p <- ggplot() +
+    geom_sf(
+      data = world,
+      fill = "gray92",
+      color = "gray60",
+      linewidth = 0.25
+    ) +
+    coord_sf(
+      xlim = xlim,
+      ylim = ylim,
+      expand = FALSE
+    ) +
+    scatterpie::geom_scatterpie(
+      data = pie_data,
+      aes(x = Longitude, y = Latitude, r = pie_radius),
+      cols = cluster_cols,
+      color = "black",
+      linewidth = 0.15,
+      alpha = 0.95
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "HDBSCAN Cluster Composition by Event: Including Noise",
+        "HDBSCAN Cluster Composition by Event: Excluding Noise"
+      ),
+      subtitle = "Pies show proportional click membership per analyzed event",
+      x = "Longitude",
+      y = "Latitude",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      panel.grid.major = element_line(color = "gray85", linewidth = 0.25),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 8.5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+```
+
+## Generate both event pie maps
+
+```{r}
+
+make_event_pie_map <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  xlim <- range(pie_data$Longitude, na.rm = TRUE) + c(-1.5, 1.5)
+  ylim <- range(pie_data$Latitude, na.rm = TRUE) + c(-1.5, 1.5)
+  
+  p <- ggplot() +
+    geom_sf(data = world, fill = "gray92", color = "gray60") +
+    coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
+    scatterpie::geom_scatterpie(
+      data = pie_data,
+      aes(x = Longitude, y = Latitude, r = pie_radius),
+      cols = cluster_cols,
+      color = "black",
+      alpha = 0.95
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "HDBSCAN Cluster Composition by Event: Including Noise",
+        "HDBSCAN Cluster Composition by Event: Excluding Noise"
+      ),
+      subtitle = "Pies show proportional click membership per analyzed event",
+      x = "Longitude",
+      y = "Latitude",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 8.5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+```
+
+## Troubleshooting
+
+```{r}
+
+## Check map coordinate ranges
+
+cat("Including noise longitude range:\n")
+print(range(event_pies_including_noise$Longitude, na.rm = TRUE))
+
+cat("Including noise latitude range:\n")
+print(range(event_pies_including_noise$Latitude, na.rm = TRUE))
+
+cat("\nRows with missing coordinates:\n")
+print(
+  event_pies_including_noise %>%
+    filter(is.na(Longitude) | is.na(Latitude))
+)
+
+cat("\nCluster columns:\n")
+print(names(event_pies_including_noise)[stringr::str_detect(names(event_pies_including_noise), "^cluster_")])
+
+cat("\nFirst few map rows:\n")
+print(head(event_pies_including_noise))
+
+# Simple point map test
+
+p_test_points <- ggplot() +
+  geom_sf(data = world, fill = "gray92", color = "gray60") +
+  geom_point(
+    data = event_pies_including_noise,
+    aes(x = Longitude, y = Latitude),
+    size = 2
+  ) +
+  coord_sf(
+    xlim = range(event_pies_including_noise$Longitude, na.rm = TRUE) + c(-2, 2),
+    ylim = range(event_pies_including_noise$Latitude, na.rm = TRUE) + c(-2, 2),
+    expand = FALSE
+  ) +
+  theme_bw()
+
+print(p_test_points)
+
+```
+
+## Manual pie-map function, no scatterpie
+
+```{r}
+
+make_pie_slice_data <- function(pie_data, cluster_cols, radius_col = "pie_radius", n_points = 80) {
+  
+  out <- list()
+  row_i <- 1
+  
+  for (i in seq_len(nrow(pie_data))) {
+    
+    vals <- as.numeric(pie_data[i, cluster_cols])
+    total <- sum(vals, na.rm = TRUE)
+    
+    if (total <= 0) next
+    
+    props <- vals / total
+    angle_starts <- c(0, cumsum(props)[-length(props)]) * 2 * pi
+    angle_ends <- cumsum(props) * 2 * pi
+    
+    for (j in seq_along(cluster_cols)) {
+      
+      if (vals[j] <= 0) next
+      
+      angles <- seq(angle_starts[j], angle_ends[j], length.out = n_points)
+      
+      out[[row_i]] <- data.frame(
+        EventID = pie_data$EventID[i],
+        cluster = stringr::str_remove(cluster_cols[j], "cluster_"),
+        Longitude = c(pie_data$Longitude[i], pie_data$Longitude[i] + pie_data[[radius_col]][i] * cos(angles)),
+        Latitude  = c(pie_data$Latitude[i],  pie_data$Latitude[i]  + pie_data[[radius_col]][i] * sin(angles)),
+        piece_id = paste0(pie_data$EventID[i], "_", cluster_cols[j])
+      )
+      
+      row_i <- row_i + 1
+    }
+  }
+  
+  bind_rows(out)
+}
+
+make_event_pie_map <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  pie_slices <- make_pie_slice_data(
+    pie_data = pie_data,
+    cluster_cols = cluster_cols,
+    radius_col = "pie_radius"
+  )
+  
+  xlim <- range(pie_data$Longitude, na.rm = TRUE) + c(-1.8, 1.8)
+  ylim <- range(pie_data$Latitude, na.rm = TRUE) + c(-1.8, 1.8)
+  
+  p <- ggplot() +
+    geom_sf(data = world, fill = "gray92", color = "gray60") +
+    geom_polygon(
+      data = pie_slices,
+      aes(
+        x = Longitude,
+        y = Latitude,
+        group = piece_id,
+        fill = cluster
+      ),
+      color = "black",
+      linewidth = 0.12,
+      alpha = 0.95
+    ) +
+    coord_sf(
+      xlim = xlim,
+      ylim = ylim,
+      expand = FALSE
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "HDBSCAN Cluster Composition by Event: Including Noise",
+        "HDBSCAN Cluster Composition by Event: Excluding Noise"
+      ),
+      subtitle = "Pies show proportional click membership per analyzed event",
+      x = "Longitude",
+      y = "Latitude",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 8.5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+```
+
+## Generate both manual event pie maps
+
+```{r}
+
+p_event_map_including_noise <- make_event_pie_map(
+  pie_data = event_pies_including_noise,
+  include_noise = TRUE,
+  output_name = "hdbscan_event_pie_map_including_noise_manual.png"
+)
+
+p_event_map_excluding_noise <- make_event_pie_map(
+  pie_data = event_pies_excluding_noise,
+  include_noise = FALSE,
+  output_name = "hdbscan_event_pie_map_excluding_noise_manual.png"
+)
+
+print(p_event_map_including_noise)
+print(p_event_map_excluding_noise)
+
+cat("Saved maps to:\n")
+cat(map_plot_dir, "\n")
+
+```
+
+## Smaller circular pies
+
+```{r}
+
+make_pie_slice_data <- function(pie_data, cluster_cols, radius_col = "pie_radius", n_points = 80) {
+  
+  out <- list()
+  row_i <- 1
+  
+  for (i in seq_len(nrow(pie_data))) {
+    
+    vals <- as.numeric(pie_data[i, cluster_cols])
+    total <- sum(vals, na.rm = TRUE)
+    
+    if (total <= 0) next
+    
+    props <- vals / total
+    angle_starts <- c(0, cumsum(props)[-length(props)]) * 2 * pi
+    angle_ends <- cumsum(props) * 2 * pi
+    
+    lat_center <- pie_data$Latitude[i]
+    lon_center <- pie_data$Longitude[i]
+    
+    # Correct longitude radius so pies look circular on lon/lat map
+    lon_correction <- 1 / cos(lat_center * pi / 180)
+    
+    r_lat <- pie_data[[radius_col]][i]
+    r_lon <- r_lat * lon_correction
+    
+    for (j in seq_along(cluster_cols)) {
+      
+      if (vals[j] <= 0) next
+      
+      angles <- seq(angle_starts[j], angle_ends[j], length.out = n_points)
+      
+      out[[row_i]] <- data.frame(
+        EventID = pie_data$EventID[i],
+        cluster = stringr::str_remove(cluster_cols[j], "cluster_"),
+        Longitude = c(lon_center, lon_center + r_lon * cos(angles)),
+        Latitude  = c(lat_center, lat_center + r_lat * sin(angles)),
+        piece_id = paste0(pie_data$EventID[i], "_", cluster_cols[j])
+      )
+      
+      row_i <- row_i + 1
+    }
+  }
+  
+  bind_rows(out)
+}
+
+# Shrink pies
+event_pies_including_noise <- event_pies_including_noise %>%
+  mutate(pie_radius = pie_radius * 0.45)
+
+event_pies_excluding_noise <- event_pies_excluding_noise %>%
+  mutate(pie_radius = pie_radius * 0.45)
+
+p_event_map_including_noise <- make_event_pie_map(
+  pie_data = event_pies_including_noise,
+  include_noise = TRUE,
+  output_name = "hdbscan_event_pie_map_including_noise_manual_smaller_circular.png"
+)
+
+p_event_map_excluding_noise <- make_event_pie_map(
+  pie_data = event_pies_excluding_noise,
+  include_noise = FALSE,
+  output_name = "hdbscan_event_pie_map_excluding_noise_manual_smaller_circular.png"
+)
+
+print(p_event_map_including_noise)
+print(p_event_map_excluding_noise)
+
+```
+
+## Stacked bar charts of event-level cluster proportions by longitude
+
+```{r}
+
+make_event_stacked_barplot <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  bar_data <- pie_data %>%
+    mutate(
+      Event_label = paste0(EventID_clean, "\n", round(abs(Longitude), 1), "°W")
+    ) %>%
+    arrange(Longitude) %>%
+    mutate(
+      Event_label = factor(Event_label, levels = Event_label)
+    ) %>%
+    select(EventID, EventID_clean, Event_label, Longitude, Latitude, all_of(cluster_cols)) %>%
+    pivot_longer(
+      cols = all_of(cluster_cols),
+      names_to = "cluster",
+      values_to = "n_clicks"
+    ) %>%
+    mutate(
+      cluster = stringr::str_remove(cluster, "cluster_")
+    ) %>%
+    group_by(EventID, EventID_clean, Event_label, Longitude, Latitude) %>%
+    mutate(
+      prop_clicks = n_clicks / sum(n_clicks)
+    ) %>%
+    ungroup()
+  
+  p <- ggplot(
+    bar_data,
+    aes(
+      x = Event_label,
+      y = prop_clicks,
+      fill = cluster
+    )
+  ) +
+    geom_col(width = 0.9, color = "black", linewidth = 0.1) +
+    scale_y_continuous(
+      labels = scales::percent_format(accuracy = 1),
+      expand = c(0, 0)
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "Event-Level HDBSCAN Cluster Proportions: Including Noise",
+        "Event-Level HDBSCAN Cluster Proportions: Excluding Noise"
+      ),
+      subtitle = "Events sorted west-to-east by longitude",
+      x = "Event / Longitude",
+      y = "Clicks per cluster (%)",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 14,
+    height = 6,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+p_bar_including_noise <- make_event_stacked_barplot(
+  pie_data = event_pies_including_noise,
+  include_noise = TRUE,
+  output_name = "hdbscan_event_stacked_barplot_including_noise.png"
+)
+
+p_bar_excluding_noise <- make_event_stacked_barplot(
+  pie_data = event_pies_excluding_noise,
+  include_noise = FALSE,
+  output_name = "hdbscan_event_stacked_barplot_excluding_noise.png"
+)
+
+print(p_bar_including_noise)
+print(p_bar_excluding_noise)
+
+```
+
+## Stacked mean spectra with map/bar colors
+
+```{r}
+
+cluster_colors_consistent <- c(
+  "0" = "#F8766D",
+  "1" = "#A3A500",
+  "2" = "#00BF7D",
+  "3" = "#00B0F6",
+  "4" = "#E76BF3"
+)
+
+# Use whichever spectra-summary object exists
+spectra_summary_for_plot <- if (exists("mean_spectra_minpts50")) {
+  mean_spectra_minpts50
+} else {
+  cluster_spectra_summary
+}
+
+spectra_summary_for_plot <- spectra_summary_for_plot %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+make_stacked_spectra_plot <- function(include_noise = TRUE, output_name) {
+  
+  plot_data <- spectra_summary_for_plot
+  
+  if (!include_noise) {
+    plot_data <- plot_data %>%
+      filter(HDBSCAN_cluster != "0")
+  }
+  
+  cluster_order <- sort(as.numeric(unique(plot_data$HDBSCAN_cluster)))
+  
+  plot_data <- plot_data %>%
+    mutate(
+      HDBSCAN_cluster = factor(HDBSCAN_cluster, levels = as.character(cluster_order)),
+      offset = as.numeric(HDBSCAN_cluster),
+      
+      # Vertical emphasis: increases peak/notch visibility without changing cluster ordering
+      stacked_spectrum = offset + mean_minmax_spectrum * 1.25
+    )
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = Frequency_kHz,
+      y = stacked_spectrum,
+      color = HDBSCAN_cluster,
+      group = HDBSCAN_cluster
+    )
+  ) +
+    geom_line(linewidth = 1.5) +
+    scale_color_manual(values = cluster_colors_consistent) +
+    scale_y_continuous(
+      breaks = cluster_order,
+      labels = cluster_order
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "Stacked Mean Spectra by HDBSCAN Cluster: Including Noise",
+        "Stacked Mean Spectra by HDBSCAN Cluster: Excluding Noise"
+      ),
+      subtitle = "5PC + scaled logICI; minPts = 50; vertical emphasis applied",
+      x = "Frequency (kHz)",
+      y = "HDBSCAN cluster",
+      color = "HDBSCAN cluster"
+    ) +
+    theme_classic(base_size = 16) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 4.2,
+    height = 9.5,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+p_spectra_including_noise <- make_stacked_spectra_plot(
+  include_noise = TRUE,
+  output_name = "hdbscan_minPts50_stacked_mean_spectra_including_noise_matching_colors.png"
+)
+
+p_spectra_excluding_noise <- make_stacked_spectra_plot(
+  include_noise = FALSE,
+  output_name = "hdbscan_minPts50_stacked_mean_spectra_excluding_noise_matching_colors.png"
+)
+
+print(p_spectra_including_noise)
+print(p_spectra_excluding_noise)
+
+```
+
+## Fix cut-off title/subtitle on stacked spectra
+
+```{r}
+
+make_stacked_spectra_plot <- function(include_noise = TRUE, output_name) {
+  
+  plot_data <- spectra_summary_for_plot
+  
+  if (!include_noise) {
+    plot_data <- plot_data %>%
+      filter(HDBSCAN_cluster != "0")
+  }
+  
+  cluster_order <- sort(as.numeric(unique(plot_data$HDBSCAN_cluster)))
+  
+  plot_data <- plot_data %>%
+    mutate(
+      HDBSCAN_cluster = factor(HDBSCAN_cluster, levels = as.character(cluster_order)),
+      offset = as.numeric(as.character(HDBSCAN_cluster)),
+      stacked_spectrum = offset + mean_minmax_spectrum * 1.25
+    )
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = Frequency_kHz,
+      y = stacked_spectrum,
+      color = HDBSCAN_cluster,
+      group = HDBSCAN_cluster
+    )
+  ) +
+    geom_line(linewidth = 1.5) +
+    scale_color_manual(values = cluster_colors_consistent) +
+    scale_y_continuous(
+      breaks = cluster_order,
+      labels = cluster_order
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "Mean Spectra: Including Noise",
+        "Mean Spectra: Excluding Noise"
+      ),
+      subtitle = "5PC + scaled logICI; minPts = 50",
+      x = "Frequency (kHz)",
+      y = "HDBSCAN cluster",
+      color = "HDBSCAN cluster"
+    ) +
+    theme_classic(base_size = 16) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.margin = margin(15, 20, 15, 15),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 6.2,
+    height = 9.5,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+p_spectra_including_noise <- make_stacked_spectra_plot(
+  include_noise = TRUE,
+  output_name = "hdbscan_minPts50_stacked_mean_spectra_including_noise_matching_colors_fixed.png"
+)
+
+p_spectra_excluding_noise <- make_stacked_spectra_plot(
+  include_noise = FALSE,
+  output_name = "hdbscan_minPts50_stacked_mean_spectra_excluding_noise_matching_colors_fixed.png"
+)
+
+print(p_spectra_including_noise)
+print(p_spectra_excluding_noise)
+
+```
+
+## Re-generate maps, stacked barplots, and spectra with consistent colors
+
+```{r}
+
+cluster_colors_consistent <- c(
+  "0" = "gray60",   # noise/unassigned
+  "1" = "#F8766D", # dark blue
+  "2" = "#7CAE00", # green
+  "3" = "#1FBFCF", # cyan
+  "4" = "#C77CFF"  # purple
+)
+
+# ============================================================
+# 1. MAPS
+# ============================================================
+
+make_event_pie_map <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  pie_slices <- make_pie_slice_data(
+    pie_data = pie_data,
+    cluster_cols = cluster_cols,
+    radius_col = "pie_radius"
+  )
+  
+  xlim <- range(pie_data$Longitude, na.rm = TRUE) + c(-1.8, 1.8)
+  ylim <- range(pie_data$Latitude, na.rm = TRUE) + c(-1.8, 1.8)
+  
+  p <- ggplot() +
+    geom_sf(data = world, fill = "gray92", color = "gray60") +
+    geom_polygon(
+      data = pie_slices,
+      aes(
+        x = Longitude,
+        y = Latitude,
+        group = piece_id,
+        fill = cluster
+      ),
+      color = "black",
+      linewidth = 0.12,
+      alpha = 0.95
+    ) +
+    scale_fill_manual(values = cluster_colors_consistent) +
+    coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
+    labs(
+      title = ifelse(include_noise, "Event Pies: Including Noise", "Event Pies: Excluding Noise"),
+      subtitle = "Proportional HDBSCAN cluster membership per analyzed event",
+      x = "Longitude",
+      y = "Latitude",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(plot.title = element_text(face = "bold"))
+  
+  ggsave(file.path(map_plot_dir, output_name), p, width = 8.5, height = 7, dpi = 300)
+  return(p)
+}
+
+p_map_including_noise <- make_event_pie_map(
+  event_pies_including_noise,
+  TRUE,
+  "hdbscan_event_pie_map_including_noise_final_colors.png"
+)
+
+p_map_excluding_noise <- make_event_pie_map(
+  event_pies_excluding_noise,
+  FALSE,
+  "hdbscan_event_pie_map_excluding_noise_final_colors.png"
+)
+
+# ============================================================
+# 2. STACKED BARPLOTS
+# ============================================================
+
+make_event_stacked_barplot <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  bar_data <- pie_data %>%
+    mutate(
+      Event_label = paste0(EventID_clean, "\n", round(abs(Longitude), 1), "°W")
+    ) %>%
+    arrange(Longitude) %>%
+    mutate(Event_label = factor(Event_label, levels = Event_label)) %>%
+    select(EventID, EventID_clean, Event_label, Longitude, Latitude, all_of(cluster_cols)) %>%
+    pivot_longer(
+      cols = all_of(cluster_cols),
+      names_to = "cluster",
+      values_to = "n_clicks"
+    ) %>%
+    mutate(cluster = stringr::str_remove(cluster, "cluster_")) %>%
+    group_by(EventID, EventID_clean, Event_label, Longitude, Latitude) %>%
+    mutate(prop_clicks = n_clicks / sum(n_clicks)) %>%
+    ungroup()
+  
+  p <- ggplot(bar_data, aes(x = Event_label, y = prop_clicks, fill = cluster)) +
+    geom_col(width = 0.9, color = "black", linewidth = 0.1) +
+    scale_fill_manual(values = cluster_colors_consistent) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1), expand = c(0, 0)) +
+    labs(
+      title = ifelse(include_noise, "Cluster Proportions by Event: Including Noise", "Cluster Proportions by Event: Excluding Noise"),
+      subtitle = "Events sorted west-to-east by longitude",
+      x = "Event / Longitude",
+      y = "Clicks per cluster (%)",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(map_plot_dir, output_name), p, width = 14, height = 6, dpi = 300)
+  return(p)
+}
+
+p_bar_including_noise <- make_event_stacked_barplot(
+  event_pies_including_noise,
+  TRUE,
+  "hdbscan_event_stacked_barplot_including_noise_final_colors.png"
+)
+
+p_bar_excluding_noise <- make_event_stacked_barplot(
+  event_pies_excluding_noise,
+  FALSE,
+  "hdbscan_event_stacked_barplot_excluding_noise_final_colors.png"
+)
+
+# ============================================================
+# 3. STACKED MEAN SPECTRA
+# ============================================================
+
+spectra_summary_for_plot <- if (exists("mean_spectra_minpts50")) {
+  mean_spectra_minpts50
+} else {
+  cluster_spectra_summary
+}
+
+spectra_summary_for_plot <- spectra_summary_for_plot %>%
+  mutate(HDBSCAN_cluster = as.character(HDBSCAN_cluster))
+
+make_stacked_spectra_plot <- function(include_noise = TRUE, output_name) {
+  
+  plot_data <- spectra_summary_for_plot
+  
+  if (!include_noise) {
+    plot_data <- plot_data %>% filter(HDBSCAN_cluster != "0")
+  }
+  
+  cluster_order <- sort(as.numeric(unique(plot_data$HDBSCAN_cluster)))
+  
+  plot_data <- plot_data %>%
+    mutate(
+      HDBSCAN_cluster = factor(HDBSCAN_cluster, levels = as.character(cluster_order)),
+      offset = as.numeric(as.character(HDBSCAN_cluster)),
+      stacked_spectrum = offset + mean_minmax_spectrum * 1.25
+    )
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = Frequency_kHz,
+      y = stacked_spectrum,
+      color = HDBSCAN_cluster,
+      group = HDBSCAN_cluster
+    )
+  ) +
+    geom_line(linewidth = 1.5) +
+    scale_color_manual(values = cluster_colors_consistent) +
+    scale_y_continuous(breaks = cluster_order, labels = cluster_order) +
+    labs(
+      title = ifelse(include_noise, "Mean Spectra: Including Noise", "Mean Spectra: Excluding Noise"),
+      subtitle = "5PC + scaled logICI; minPts = 50",
+      x = "Frequency (kHz)",
+      y = "HDBSCAN cluster",
+      color = "HDBSCAN cluster"
+    ) +
+    theme_classic(base_size = 16) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.margin = margin(15, 20, 15, 15)
+    )
+  
+  ggsave(file.path(map_plot_dir, output_name), p, width = 6.2, height = 9.5, dpi = 300)
+  return(p)
+}
+
+p_spectra_including_noise <- make_stacked_spectra_plot(
+  TRUE,
+  "hdbscan_minPts50_stacked_mean_spectra_including_noise_final_colors.png"
+)
+
+p_spectra_excluding_noise <- make_stacked_spectra_plot(
+  FALSE,
+  "hdbscan_minPts50_stacked_mean_spectra_excluding_noise_final_colors.png"
+)
+
+print(p_map_including_noise)
+print(p_map_excluding_noise)
+print(p_bar_including_noise)
+print(p_bar_excluding_noise)
+print(p_spectra_including_noise)
+print(p_spectra_excluding_noise)
+
+```
+
+## Big event pie maps with gray noise + matching cluster colors
+
+```{r}
+
+cluster_colors_consistent <- c(
+  "0" = "gray60",   # noise/unassigned
+  "1" = "#F8766D", # red
+  "2" = "#7CAE00", # green
+  "3" = "#1FBFCF", # cyan
+  "4" = "#C77CFF"  # purple
+)
+
+# Rebuild radii fresh so pies are big again
+add_pie_radius_custom <- function(df, max_radius = 0.50) {
+  
+  cluster_cols <- names(df)[stringr::str_detect(names(df), "^cluster_")]
+  
+  df %>%
+    mutate(
+      total_clicks_mapped = rowSums(across(all_of(cluster_cols))),
+      pie_radius = sqrt(total_clicks_mapped) /
+        max(sqrt(total_clicks_mapped), na.rm = TRUE) * max_radius
+    )
+}
+
+event_pies_including_noise_big <- add_pie_radius_custom(
+  event_pies_including_noise,
+  max_radius = 0.50
+)
+
+event_pies_excluding_noise_big <- add_pie_radius_custom(
+  event_pies_excluding_noise,
+  max_radius = 0.42
+)
+
+make_event_pie_map_big <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  pie_slices <- make_pie_slice_data(
+    pie_data = pie_data,
+    cluster_cols = cluster_cols,
+    radius_col = "pie_radius"
+  )
+  
+  xlim <- range(pie_data$Longitude, na.rm = TRUE) + c(-1.8, 1.8)
+  ylim <- range(pie_data$Latitude, na.rm = TRUE) + c(-1.8, 1.8)
+  
+  p <- ggplot() +
+    geom_sf(data = world, fill = "gray92", color = "gray60") +
+    geom_polygon(
+      data = pie_slices,
+      aes(
+        x = Longitude,
+        y = Latitude,
+        group = piece_id,
+        fill = cluster
+      ),
+      color = "black",
+      linewidth = 0.12,
+      alpha = 0.95
+    ) +
+    scale_fill_manual(values = cluster_colors_consistent) +
+    coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "Event Pies: Including Noise",
+        "Event Pies: Excluding Noise"
+      ),
+      subtitle = "Proportional HDBSCAN cluster membership per analyzed event",
+      x = "Longitude",
+      y = "Latitude",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    file.path(map_plot_dir, output_name),
+    p,
+    width = 8.5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+p_map_including_noise_big <- make_event_pie_map_big(
+  event_pies_including_noise_big,
+  TRUE,
+  "hdbscan_event_pie_map_including_noise_big_matching_colors.png"
+)
+
+p_map_excluding_noise_big <- make_event_pie_map_big(
+  event_pies_excluding_noise_big,
+  FALSE,
+  "hdbscan_event_pie_map_excluding_noise_big_matching_colors.png"
+)
+
+print(p_map_including_noise_big)
+print(p_map_excluding_noise_big)
+
+```
+
+## Drift-Level plotting
+
+```{r}
+
+
+
+```
+
+## Drift-level cluster composition maps and stacked plots
+
+```{r}
+
+# ============================================================
+# DRIFT-LEVEL PIE MAPS + STACKED COMPOSITION PLOTS
+# Same style as original event-level workflow
+# ============================================================
+
+# ------------------------------------------------------------
+# Output folders: same parent folder as event-level maps
+# ------------------------------------------------------------
+
+map_output_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/minPts50_event_cluster_maps"
+map_plot_dir  <- file.path(map_output_dir, "plots")
+map_table_dir <- file.path(map_output_dir, "tables")
+
+dir.create(map_plot_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(map_table_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Build one clean drift coordinate table
+# IMPORTANT: one row per drift only
+# ------------------------------------------------------------
+
+drift_coords <- event_cluster_counts %>%
+  mutate(
+    DriftID_clean = stringr::str_remove(EventID_clean, "_[0-9]+$")
+  ) %>%
+  distinct(EventID_clean, DriftID_clean, Latitude, Longitude) %>%
+  group_by(DriftID_clean) %>%
+  summarise(
+    Latitude = mean(Latitude, na.rm = TRUE),
+    Longitude = mean(Longitude, na.rm = TRUE),
+    n_events = n_distinct(EventID_clean),
+    .groups = "drop"
+  )
+
+# ------------------------------------------------------------
+# Build drift-level cluster counts
+# This is the only real analytical change:
+# event-level counts are summed up to drift-level counts
+# ------------------------------------------------------------
+
+drift_cluster_counts <- event_cluster_counts %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    DriftID_clean = stringr::str_remove(EventID_clean, "_[0-9]+$")
+  ) %>%
+  group_by(DriftID_clean, HDBSCAN_cluster) %>%
+  summarise(
+    n_clicks = sum(n_clicks, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    drift_coords,
+    by = "DriftID_clean"
+  )
+
+cat("Rows in drift_cluster_counts:", nrow(drift_cluster_counts), "\n")
+cat("Unique drifts:", dplyr::n_distinct(drift_cluster_counts$DriftID_clean), "\n")
+cat("Total clicks represented:", sum(drift_cluster_counts$n_clicks), "\n\n")
+
+print(drift_cluster_counts, n = Inf)
+
+# ------------------------------------------------------------
+# Make wide drift pie tables
+# These mimic the original event pie tables
+# ------------------------------------------------------------
+
+drift_pies_including_noise <- drift_cluster_counts %>%
+  select(
+    DriftID_clean,
+    Latitude,
+    Longitude,
+    n_events,
+    HDBSCAN_cluster,
+    n_clicks
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = HDBSCAN_cluster,
+    values_from = n_clicks,
+    values_fill = 0,
+    names_prefix = "cluster_"
+  ) %>%
+  mutate(
+    # Compatibility with original make_pie_slice_data()
+    # It expects a column named EventID.
+    EventID = DriftID_clean
+  )
+
+drift_pies_excluding_noise <- drift_cluster_counts %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  select(
+    DriftID_clean,
+    Latitude,
+    Longitude,
+    n_events,
+    HDBSCAN_cluster,
+    n_clicks
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = HDBSCAN_cluster,
+    values_from = n_clicks,
+    values_fill = 0,
+    names_prefix = "cluster_"
+  ) %>%
+  mutate(
+    EventID = DriftID_clean
+  )
+
+# ------------------------------------------------------------
+# Pie radius
+# Use fixed size so pies are comparable by composition,
+# not by number of clicks.
+# ------------------------------------------------------------
+
+drift_fixed_pie_radius <- 0.45
+
+drift_pies_including_noise <- drift_pies_including_noise %>%
+  mutate(pie_radius = drift_fixed_pie_radius)
+
+drift_pies_excluding_noise <- drift_pies_excluding_noise %>%
+  mutate(pie_radius = drift_fixed_pie_radius)
+
+# ------------------------------------------------------------
+# Save drift pie tables
+# ------------------------------------------------------------
+
+write.csv(
+  drift_pies_including_noise,
+  file.path(map_table_dir, "drift_pie_map_data_including_noise.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  drift_pies_excluding_noise,
+  file.path(map_table_dir, "drift_pie_map_data_excluding_noise.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Drift pie map function
+# Uses original manual pie-slice workflow
+# ------------------------------------------------------------
+
+make_drift_pie_map <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  pie_slices <- make_pie_slice_data(
+    pie_data = pie_data,
+    cluster_cols = cluster_cols,
+    radius_col = "pie_radius"
+  )
+  
+  xlim <- range(pie_data$Longitude, na.rm = TRUE) + c(-1.5, 1.5)
+  ylim <- range(pie_data$Latitude, na.rm = TRUE) + c(-1.5, 1.5)
+  
+  p <- ggplot() +
+    geom_sf(
+      data = world,
+      fill = "gray92",
+      color = "gray60"
+    ) +
+    geom_polygon(
+      data = pie_slices,
+      aes(
+        x = Longitude,
+        y = Latitude,
+        group = piece_id,
+        fill = cluster
+      ),
+      color = "black",
+      linewidth = 0.12,
+      alpha = 0.95
+    ) +
+    scale_fill_manual(
+      values = cluster_colors_consistent,
+      drop = FALSE
+    ) +
+    coord_sf(
+      xlim = xlim,
+      ylim = ylim,
+      expand = FALSE
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "Drift-Level HDBSCAN Cluster Composition: Including Noise",
+        "Drift-Level HDBSCAN Cluster Composition: Excluding Noise"
+      ),
+      subtitle = "One pie per drift",
+      x = "Longitude",
+      y = "Latitude",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold")
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 8.5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Make drift pie maps
+# ------------------------------------------------------------
+
+p_drift_map_including_noise <- make_drift_pie_map(
+  pie_data = drift_pies_including_noise,
+  include_noise = TRUE,
+  output_name = "hdbscan_drift_pie_map_including_noise_final_colors.png"
+)
+
+p_drift_map_excluding_noise <- make_drift_pie_map(
+  pie_data = drift_pies_excluding_noise,
+  include_noise = FALSE,
+  output_name = "hdbscan_drift_pie_map_excluding_noise_final_colors.png"
+)
+
+print(p_drift_map_including_noise)
+print(p_drift_map_excluding_noise)
+
+# ============================================================
+# DRIFT-LEVEL STACKED COMPOSITION PLOTS
+# Same style as original event-level stacked plots
+# ============================================================
+
+make_drift_stacked_barplot <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  bar_data <- pie_data %>%
+    arrange(Longitude) %>%
+    mutate(
+      Drift_label = paste0(DriftID_clean, "\n", round(abs(Longitude), 1), "°W"),
+      Drift_label = factor(Drift_label, levels = Drift_label)
+    ) %>%
+    select(
+      EventID,
+      DriftID_clean,
+      Drift_label,
+      Longitude,
+      Latitude,
+      all_of(cluster_cols)
+    ) %>%
+    tidyr::pivot_longer(
+      cols = all_of(cluster_cols),
+      names_to = "cluster",
+      values_to = "n_clicks"
+    ) %>%
+    mutate(
+      cluster = stringr::str_remove(cluster, "cluster_")
+    ) %>%
+    group_by(EventID, DriftID_clean, Drift_label, Longitude, Latitude) %>%
+    mutate(
+      prop_clicks = n_clicks / sum(n_clicks)
+    ) %>%
+    ungroup()
+  
+  fill_values <- if (include_noise) {
+    cluster_colors_consistent
+  } else {
+    cluster_colors_consistent[names(cluster_colors_consistent) != "0"]
+  }
+  
+  p <- ggplot(
+    bar_data,
+    aes(
+      x = Drift_label,
+      y = prop_clicks,
+      fill = cluster
+    )
+  ) +
+    geom_col(
+      width = 0.9,
+      color = "black",
+      linewidth = 0.1
+    ) +
+    scale_fill_manual(
+      values = fill_values,
+      drop = FALSE
+    ) +
+    scale_y_continuous(
+      labels = scales::percent_format(accuracy = 1),
+      expand = c(0, 0)
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "Drift-Level HDBSCAN Cluster Composition: Including Noise",
+        "Drift-Level HDBSCAN Cluster Composition: Excluding Noise"
+      ),
+      subtitle = "Drifts ordered west-to-east by longitude",
+      x = "Drift",
+      y = "Percent of analyzed clicks",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "right"
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 11,
+    height = 6,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Make drift stacked plots
+# ------------------------------------------------------------
+
+p_drift_bar_including_noise <- make_drift_stacked_barplot(
+  pie_data = drift_pies_including_noise,
+  include_noise = TRUE,
+  output_name = "hdbscan_drift_stacked_composition_including_noise_final_colors.png"
+)
+
+p_drift_bar_excluding_noise <- make_drift_stacked_barplot(
+  pie_data = drift_pies_excluding_noise,
+  include_noise = FALSE,
+  output_name = "hdbscan_drift_stacked_composition_excluding_noise_final_colors.png"
+)
+
+print(p_drift_bar_including_noise)
+print(p_drift_bar_excluding_noise)
+
+cat("\nDONE: Drift-level pie maps and stacked plots saved to:\n")
+cat(map_plot_dir, "\n")
+
+```
+
+## Plot Groups for Crowded Areas
+
+```{r}
+
+# ------------------------------------------------------------
+# Define manual ADRIFT plotting groups using coordinate zones
+#
+# These groups affect plotting only.
+# Original DriftID_clean and HDBSCAN assignments are unchanged.
+# ------------------------------------------------------------
+
+manual_grouped_drift_counts <- drift_cluster_counts %>%
+  mutate(
+    PlotGroupID = case_when(
+      
+      # ------------------------------------------------------
+      # Northern nearshore ADRIFT group
+      # Around ~41N, ~124W
+      # ------------------------------------------------------
+      stringr::str_detect(DriftID_clean, "^ADRIFT") &
+        Latitude >= 40.3 &
+        Latitude <= 41.5 &
+        Longitude >= -125.0 &
+        Longitude <= -124.0 ~ "ADRIFT_North_41N_124W",
+      
+      # ------------------------------------------------------
+      # Central nearshore ADRIFT group
+      # Around ~38N, ~124W
+      # ------------------------------------------------------
+      stringr::str_detect(DriftID_clean, "^ADRIFT") &
+        Latitude >= 37.3 &
+        Latitude <= 38.5 &
+        Longitude >= -124.2 &
+        Longitude <= -123.2 ~ "ADRIFT_Central_38N_124W",
+      
+      # ------------------------------------------------------
+      # Southern nearshore ADRIFT group
+      # Around ~36N, ~122W
+      # ------------------------------------------------------
+      stringr::str_detect(DriftID_clean, "^ADRIFT") &
+        Latitude >= 35.2 &
+        Latitude <= 36.3 &
+        Longitude >= -122.6 &
+        Longitude <= -121.2 ~ "ADRIFT_South_36N_122W",
+      
+      # ------------------------------------------------------
+      # Everything else stays as one pie per drift
+      # ------------------------------------------------------
+      TRUE ~ DriftID_clean
+    )
+  )
+
+# ------------------------------------------------------------
+# Check exactly which drifts are assigned to each plot group
+# ------------------------------------------------------------
+
+manual_plot_group_membership <- manual_grouped_drift_counts %>%
+  distinct(
+    PlotGroupID,
+    DriftID_clean,
+    Latitude,
+    Longitude
+  ) %>%
+  group_by(PlotGroupID) %>%
+  summarise(
+    n_drifts_in_group = n_distinct(DriftID_clean),
+    drifts_in_group = paste(sort(unique(DriftID_clean)), collapse = "; "),
+    group_latitude = mean(Latitude, na.rm = TRUE),
+    group_longitude = mean(Longitude, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(group_latitude)
+
+cat("\nManual ADRIFT plot group membership:\n")
+print(manual_plot_group_membership, n = Inf)
+
+write.csv(
+  manual_plot_group_membership,
+  file.path(map_table_dir, "manual_adrift_plot_group_membership_improved.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Create ONE coordinate per plotting group
+# ------------------------------------------------------------
+
+manual_group_coordinates <- manual_grouped_drift_counts %>%
+  group_by(PlotGroupID) %>%
+  summarise(
+    Latitude = mean(Latitude, na.rm = TRUE),
+    Longitude = mean(Longitude, na.rm = TRUE),
+    n_drifts_in_group = n_distinct(DriftID_clean),
+    drifts_in_group = paste(sort(unique(DriftID_clean)), collapse = "; "),
+    .groups = "drop"
+  )
+
+# ------------------------------------------------------------
+# Collapse cluster counts to plotting groups
+# IMPORTANT:
+# coordinates are added AFTER cluster summarisation
+# so every cluster slice shares the SAME pie center
+# ------------------------------------------------------------
+
+manual_grouped_cluster_counts <- manual_grouped_drift_counts %>%
+  group_by(PlotGroupID, HDBSCAN_cluster) %>%
+  summarise(
+    n_clicks = sum(n_clicks, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    manual_group_coordinates,
+    by = "PlotGroupID"
+  )
+
+cat("\nManual grouped cluster counts:\n")
+print(manual_grouped_cluster_counts, n = Inf)
+
+write.csv(
+  manual_grouped_cluster_counts,
+  file.path(map_table_dir, "manual_adrift_grouped_cluster_counts_improved.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Wide pie tables: including noise
+# ------------------------------------------------------------
+
+manual_grouped_pies_including_noise <- manual_grouped_cluster_counts %>%
+  select(
+    PlotGroupID,
+    Latitude,
+    Longitude,
+    n_drifts_in_group,
+    drifts_in_group,
+    HDBSCAN_cluster,
+    n_clicks
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = HDBSCAN_cluster,
+    values_from = n_clicks,
+    values_fill = 0,
+    names_prefix = "cluster_"
+  ) %>%
+  mutate(
+    EventID = PlotGroupID,
+    pie_radius = 0.45
+  )
+
+# ------------------------------------------------------------
+# Wide pie tables: excluding noise
+# ------------------------------------------------------------
+
+manual_grouped_pies_excluding_noise <- manual_grouped_cluster_counts %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  select(
+    PlotGroupID,
+    Latitude,
+    Longitude,
+    n_drifts_in_group,
+    drifts_in_group,
+    HDBSCAN_cluster,
+    n_clicks
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = HDBSCAN_cluster,
+    values_from = n_clicks,
+    values_fill = 0,
+    names_prefix = "cluster_"
+  ) %>%
+  mutate(
+    EventID = PlotGroupID,
+    pie_radius = 0.45
+  )
+
+write.csv(
+  manual_grouped_pies_including_noise,
+  file.path(map_table_dir, "manual_adrift_grouped_pie_data_including_noise_improved.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  manual_grouped_pies_excluding_noise,
+  file.path(map_table_dir, "manual_adrift_grouped_pie_data_excluding_noise_improved.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Map helper
+# Same style as existing drift-level pie maps
+# ------------------------------------------------------------
+
+make_manual_grouped_pie_map <- function(pie_data, include_noise = TRUE, output_name) {
+  
+  cluster_cols <- names(pie_data)[stringr::str_detect(names(pie_data), "^cluster_")]
+  
+  cluster_cols <- cluster_cols[
+    order(as.numeric(stringr::str_remove(cluster_cols, "cluster_")))
+  ]
+  
+  pie_slices <- make_pie_slice_data(
+    pie_data = pie_data,
+    cluster_cols = cluster_cols,
+    radius_col = "pie_radius"
+  )
+  
+  xlim <- range(pie_data$Longitude, na.rm = TRUE) + c(-1.5, 1.5)
+  ylim <- range(pie_data$Latitude, na.rm = TRUE) + c(-1.5, 1.5)
+  
+  p <- ggplot() +
+    geom_sf(
+      data = world,
+      fill = "gray92",
+      color = "gray60"
+    ) +
+    geom_polygon(
+      data = pie_slices,
+      aes(
+        x = Longitude,
+        y = Latitude,
+        group = piece_id,
+        fill = cluster
+      ),
+      color = "black",
+      linewidth = 0.12,
+      alpha = 0.95
+    ) +
+    scale_fill_manual(
+      values = cluster_colors_consistent,
+      drop = FALSE
+    ) +
+    coord_sf(
+      xlim = xlim,
+      ylim = ylim,
+      expand = FALSE
+    ) +
+    labs(
+      title = ifelse(
+        include_noise,
+        "Manual ADRIFT Grouped Drift Pies: Including Noise",
+        "Manual ADRIFT Grouped Drift Pies: Excluding Noise"
+      ),
+      subtitle = "Crowded ADRIFT drifts grouped near ~41N, ~38N, and ~36N for visualization only",
+      x = "Longitude",
+      y = "Latitude",
+      fill = "HDBSCAN cluster"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold")
+    )
+  
+  ggsave(
+    filename = file.path(map_plot_dir, output_name),
+    plot = p,
+    width = 8.5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Make improved grouped pie maps
+# ------------------------------------------------------------
+
+p_manual_grouped_map_including_noise <- make_manual_grouped_pie_map(
+  pie_data = manual_grouped_pies_including_noise,
+  include_noise = TRUE,
+  output_name = "hdbscan_manual_adrift_grouped_pie_map_including_noise_improved.png"
+)
+
+p_manual_grouped_map_excluding_noise <- make_manual_grouped_pie_map(
+  pie_data = manual_grouped_pies_excluding_noise,
+  include_noise = FALSE,
+  output_name = "hdbscan_manual_adrift_grouped_pie_map_excluding_noise_improved.png"
+)
+
+print(p_manual_grouped_map_including_noise)
+print(p_manual_grouped_map_excluding_noise)
+
+cat("\nDONE: Improved manual ADRIFT grouped pie maps saved to:\n")
+cat(map_plot_dir, "\n")
+
+```
+
+## Mean click spectra by HDBSCAN cluster with 95% CI ribbons
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+
+# ------------------------------------------------------------
+# Output folder
+# ------------------------------------------------------------
+
+minpts50_plot_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/Main_minPts50_5PC_scaled_logICI/plots"
+
+dir.create(
+  minpts50_plot_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# ------------------------------------------------------------
+# Build 95% CI table from mean_spectra_minpts50
+# ------------------------------------------------------------
+
+mean_spectra_minpts50_ci <- mean_spectra_minpts50 %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    se_minmax_spectrum = sd_minmax_spectrum / sqrt(n_clicks),
+    ci95_lower = mean_minmax_spectrum - 1.96 * se_minmax_spectrum,
+    ci95_upper = mean_minmax_spectrum + 1.96 * se_minmax_spectrum,
+    ci95_lower_plot = pmax(ci95_lower, 0),
+    ci95_upper_plot = pmin(ci95_upper, 1)
+  ) %>%
+  filter(
+    HDBSCAN_cluster %in% c("1", "2", "3", "4")
+  )
+
+# ------------------------------------------------------------
+# Sanity check
+# ------------------------------------------------------------
+
+cat("\nClusters included in CI spectra figure:\n")
+
+mean_spectra_minpts50_ci %>%
+  distinct(HDBSCAN_cluster, n_clicks) %>%
+  arrange(as.numeric(HDBSCAN_cluster)) %>%
+  print()
+
+# ------------------------------------------------------------
+# Plot: mean spectra with 95% CI ribbons
+# ------------------------------------------------------------
+
+p_mean_spectra_minpts50_ci <- ggplot(
+  mean_spectra_minpts50_ci,
+  aes(
+    x = Frequency_kHz,
+    y = mean_minmax_spectrum
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = ci95_lower_plot,
+      ymax = ci95_upper_plot
+    ),
+    fill = "gray70",
+    alpha = 0.55
+  ) +
+  geom_line(
+    linewidth = 1.1,
+    color = "black"
+  ) +
+  facet_wrap(
+    ~ HDBSCAN_cluster,
+    ncol = 2
+  ) +
+  coord_cartesian(
+    ylim = c(0, 1)
+  ) +
+  labs(
+    title = "Mean Click Spectra by HDBSCAN Cluster",
+    subtitle = "Mean ± 95% CI; 5PC + scaled logICI; minPts = 50; noise excluded",
+    x = "Frequency (kHz)",
+    y = "Min-max normalized amplitude"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    strip.background = element_rect(fill = "gray85", color = "gray40"),
+    strip.text = element_text(face = "bold")
+  )
+
+print(p_mean_spectra_minpts50_ci)
+
+# ------------------------------------------------------------
+# Save figure and table
+# ------------------------------------------------------------
+
+ggsave(
+  filename = file.path(
+    minpts50_plot_dir,
+    "hdbscan_minPts50_mean_click_spectra_95CI_noise_excluded.png"
+  ),
+  plot = p_mean_spectra_minpts50_ci,
+  width = 11,
+  height = 8,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(
+    minpts50_plot_dir,
+    "hdbscan_minPts50_mean_click_spectra_95CI_noise_excluded.pdf"
+  ),
+  plot = p_mean_spectra_minpts50_ci,
+  width = 11,
+  height = 8
+)
+
+write.csv(
+  mean_spectra_minpts50_ci,
+  file.path(
+    minpts50_plot_dir,
+    "hdbscan_minPts50_mean_click_spectra_95CI_noise_excluded.csv"
+  ),
+  row.names = FALSE
+)
+
+cat("\nDONE: Mean click spectra with 95% CI saved to:\n")
+cat(minpts50_plot_dir, "\n")
+
+```
+
+## Mean spectra with Variability Ribbons for All Non-Noise Clusters Color-coded to match maps / stacked plots
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+
+# ------------------------------------------------------------
+# Output folder
+# ------------------------------------------------------------
+
+minpts50_plot_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/Main_minPts50_5PC_scaled_logICI/plots"
+
+dir.create(
+  minpts50_plot_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# ------------------------------------------------------------
+# Cluster colors used across maps / stacked plots
+# ------------------------------------------------------------
+
+cluster_colors_consistent <- c(
+  "0" = "gray60",
+  "1" = "#F8766D",
+  "2" = "#7CAE00",
+  "3" = "#1FBFCF",
+  "4" = "#C77CFF"
+)
+
+cluster_colors_no_noise <- cluster_colors_consistent[c("1", "2", "3", "4")]
+
+# ------------------------------------------------------------
+# Use non-noise HDBSCAN clusters from final minPts50 analysis
+# ------------------------------------------------------------
+
+cluster_spectra_ribbon_data <- mean_spectra_minpts50 %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  ) %>%
+  filter(
+    HDBSCAN_cluster %in% c("1", "2", "3", "4")
+  ) %>%
+  mutate(
+    lower_sd = pmax(mean_minmax_spectrum - sd_minmax_spectrum, 0),
+    upper_sd = pmin(mean_minmax_spectrum + sd_minmax_spectrum, 1)
+  )
+
+# ------------------------------------------------------------
+# Sanity check
+# ------------------------------------------------------------
+
+cat("\nClusters included in SD spectra figure:\n")
+
+cluster_spectra_ribbon_data %>%
+  distinct(HDBSCAN_cluster, n_clicks) %>%
+  arrange(as.numeric(HDBSCAN_cluster)) %>%
+  print()
+
+# ------------------------------------------------------------
+# Faceted mean ± SD ribbons
+# ------------------------------------------------------------
+
+p_cluster_spectra_ribbons <- ggplot(
+  cluster_spectra_ribbon_data,
+  aes(
+    x = Frequency_kHz,
+    y = mean_minmax_spectrum
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = lower_sd,
+      ymax = upper_sd,
+      fill = HDBSCAN_cluster
+    ),
+    alpha = 0.25,
+    color = NA
+  ) +
+  geom_line(
+    aes(color = HDBSCAN_cluster),
+    linewidth = 1
+  ) +
+  facet_wrap(
+    ~ HDBSCAN_cluster,
+    ncol = 2
+  ) +
+  scale_fill_manual(
+    values = cluster_colors_no_noise,
+    drop = FALSE
+  ) +
+  scale_color_manual(
+    values = cluster_colors_no_noise,
+    drop = FALSE
+  ) +
+  coord_cartesian(
+    ylim = c(0, 1)
+  ) +
+  labs(
+    title = "Mean Spectra with Variability by HDBSCAN Cluster",
+    subtitle = "Mean ± 1 SD; 5PC + scaled logICI; minPts = 50; noise excluded",
+    x = "Frequency (kHz)",
+    y = "Min-max normalized amplitude",
+    fill = "HDBSCAN cluster",
+    color = "HDBSCAN cluster"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    strip.background = element_rect(fill = "gray85", color = "gray40"),
+    strip.text = element_text(face = "bold")
+  )
+
+print(p_cluster_spectra_ribbons)
+
+ggsave(
+  filename = file.path(
+    minpts50_plot_dir,
+    "hdbscan_minPts50_mean_spectra_SD_colorcoded_noise_excluded.png"
+  ),
+  plot = p_cluster_spectra_ribbons,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+# ------------------------------------------------------------
+# Save ribbon data
+# ------------------------------------------------------------
+
+write.csv(
+  cluster_spectra_ribbon_data,
+  file = file.path(
+    minpts50_plot_dir,
+    "hdbscan_minPts50_mean_spectra_SD_colorcoded_noise_excluded.csv"
+  ),
+  row.names = FALSE
+)
+
+cat("\nDONE: Color-coded mean spectra with ±1 SD saved to:\n")
+cat(minpts50_plot_dir, "\n")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

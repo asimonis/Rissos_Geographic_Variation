@@ -1,5 +1,5 @@
 ---
-title: "Geographic Variation in Echolocation Clicks of Risso's Dolphins (Grampus griseus) in the California Current"
+title: "Geographic Variation in Echolocation Clicks of Risso's Dolphins (<i>Grampus griseus</i>) in the California Current"
 format:
   docx:
     toc: false
@@ -13,87 +13,61 @@ bibliography: references.bib
 
 ## **Authors**
 
-Sarah M.S. Moseley, Anne Simonis, Ellen Hines, Marie A. Roch, Shannon Rankin
+Sarah M.S. Moseley^1^, Marie A. Roch^2^, Shannon Rankin^3^, Cory Hom-Weaver^4^, Ellen Hines^5^, Anne Simonis^6^
 
-# Abstract(s)
+^1^ San Francisco State University
 
-## The following is the abstract used for submission to the ASA conference:
+^2^ San Diego State University
 
-Risso’s dolphins (*Grampus griseus*) produce broadband echolocation clicks that vary across regions, offering insight into population structure and habitat use. Two stocks are recognized in U.S. Pacific waters: the California–Oregon–Washington stock and the Hawaiian stock, but these designations may overlook finer-scale structure within the California Current Ecosystem (CCE). Building on evidence of geographic variation in Risso’s dolphin echolocation click types across the U.S. East Coast, Gulf of Mexico, Southern California Bight, and Hawaiian Islands, spectral peak and notch frequencies were measured from Risso’s dolphin echolocation clicks during three NOAA surveys between 2016 and 2023. Acoustic recordings were collected with drifting buoys, allowing broad coverage of the entire CCE region along the U.S. West Coast. Clustering of spectral features highlighted several different click types. We compared spatio-temporal variation in Risso’s click types across Oregon, Northern California, and Central California, including seasonal and diel variation. These results provide the first comprehensive assessment of Risso’s dolphin click characteristics across the CCE and enable comparison with other U.S. regions where click-type divergence has been observed. Fine-scale spatial, seasonal, and diel acoustic patterns can inform population assessment, ecological understanding, and ecosystem-based management.
+^3^ NOAA SWFSC
 
-## The following is the abstract used for submission to the SMM conference:
+^4^ Ocean Science Analytics
 
-**Use of passive acoustic monitoring to assess population structure in Risso’s dolphins (*Grampus griseus*) across the California Current Ecosystem**
+^5^ San Francisco State University
 
-Risso’s dolphins (*Grampus griseus*) are a widely distributed, primarily offshore species whose population structure within the California Current Ecosystem (CCE) remains relatively unstudied. In U.S. Pacific waters, two stocks are currently recognized — the California–Oregon–Washington stock and the Hawaiian stock — though these designations may overlook finer-scale spatial and temporal structure that is difficult to resolve using current stock assessment approaches alone. Passive acoustic monitoring (PAM) provides an alternative means of examining population-level structure by characterizing spatial and temporal variation in acoustic behavior across broad offshore regions. We used PAM data collected during three NOAA surveys between 2016 and 2023 to investigate spatial, seasonal, and diel variation in Risso’s dolphin acoustic signals across the CCE. Recordings from drifting acoustic recorders provided coverage spanning Oregon, Northern California, and Central California. Distinct acoustic signal types were identified, and their relative occurrence was examined across regions and time periods. Spatial and temporal differences in signal-type distributions were observed, indicating structured variation within the CCE. Building upon prior work demonstrating acoustic differentiation of Risso’s dolphins within other regions, these results further resolve how signal-type composition varies across regions and seasons. By revealing fine-scale spatial and temporal structure, PAM offers a valuable tool for informing population assessment, improving ecological understanding, and supporting ecosystem-based management of offshore cetaceans.
+^6^ San Francisco State University
+
+# Acknowledgements
+
+Committe / Co-authors, EOS Center, Simonis-Hines-Jahncke Lab, BOEM and NOAA for data collection, CSU COAST, ONR for graduate student support, Melissa Soldevilla / Soldevilla et al. 2017
 
 # I. Introduction
 
-## Soldevilla et al. 2017 layout (with my notes):
-
--   PAM (specifically drifting acoustic recorders - benefits)
-
--   Use of acoustic variation in possible determination of population divergence
-
--   Where does click variation come from? Morphological differences is the most likely hypothesis
-
--   Introduction of specifics about Risso's (distribution, diet, endangered status)
-
--   Introduction of pre-established geographic variation in Soldevilla et al. 2017
-
--   Why do we care about population structure specifically in the CCE? Two distinct stocks may overlook fine-scale population structure, anthropogentic impact (proposed off-shore wind energy ares)
-
--   "This study..." (first comprehensive comprehensive assessment of Risso’s dolphin click characteristics across the CCE and enable comparison with other U.S. regions where click-type divergence has been observed. Fine-scale spatial, seasonal, and diel acoustic patterns can inform population assessment, ecological understanding, and ecosystem-based management.)
-
--   "First... Then... Finally" (Soldevilla et al. 2017: click spectra are evaluated, k-means clustering, mean spectral peak and notch frequencies quantified for each encounter, regional variability)
-
-## My (proposed) layout:
-
--   Species and ecological context
-
--   Population structure problem (NOAA Stock)
-
--   Transition and introduction to PAM and acoustic identification
-
--   Spectral banding
-
--   Introducing Soldevilla et al. 2008 and 2017
-
--   Knowledge gap / "that's where my research comes in..."
-
--   Management context (revisited with special emphasis on CCES)
-
--   "This study..."
-
--   "First... Then... Finally"
-
-## Rough Draft:
-
 Risso's dolphins (*Grampus griseus*) are globally distributed, deep-diving odontocetes primarily found in temperate and tropical environments, where they are commonly associated with continental slope and offshore habitats [@baird2009]. Despite their broad distribution, Risso's ecology and population structure remain relatively unstudied [@jefferson2017]. As with many pelagic cetaceans, studying Risso's dolphins presents challenges as animals occupy large and dynamic habitats, are difficult to observe consistently over time and space, and may exhibit biological structuring that is not readily apparent from visual surveys alone [@forney1998; @smith2020]. As a result, uncertainty introduced by these challenges complicates efforts to define biological population boundaries, yet such boundaries are pivotal to effective species management and conservation [@carretta2024; @grech2011].
 
-Along the United States West Coast within the United States Exclusive Economic Zone, Risso's dolphins are managed within one, broad "stock" delineation defined for assessment and conservation purposes – the California-Oregon-Washington (CA-OR-WA) stock [@carretta2024]. The offshore extent of this stock's boundaries are unknown, and the currently recognized management unit may overlook multiple independent populations [@carretta2024]. For this reason, any independent line of evidence that helps to evaluate spatial and temporal structuring within this broadly managed system is scientifically and practically valuable [@martien2019].
+Along the United States West Coast within the United States Exclusive Economic Zone (US EEZ), Risso's dolphins are managed within one, broad "stock" delineation defined for assessment and conservation purposes – the California-Oregon-Washington (CA-OR-WA) stock [@carretta2024]. The offshore extent of this stock's boundaries are unknown, and the currently recognized management unit may overlook multiple independent populations [@carretta2024]. For this reason, any independent line of evidence that helps to evaluate spatial and temporal structuring within this broadly managed system is scientifically and practically valuable [@martien2019].
 
-This exploration is especially relevant in the California Current Ecosystem – a large, eastern boundary current characterized by strong gradients in bathymetry, productivity, oceanography, species diversity, anthropogenic impact, and prey availability [@mcclatchie2025]. Such heterogeneity lends itself to shaping cetacean distribution, use of habitat, and foraging behavior across space and time [@barlow2007]. As an offshore species associated with deep-water habitats, for Risso's dolphins the CCE provides a biologically meaningful setting in which to explore temporal and geographic variation in the acoustic characteristics of the species within a single, dynamic ecosystem [@barlow2007; @forney1998].
+This exploration is especially relevant in the California Current Ecosystem (CCE) – a large, eastern boundary current characterized by strong gradients in bathymetry, productivity, oceanography, species diversity, anthropogenic impact, and prey availability [@mcclatchie2025]. Such heterogeneity lends itself to shaping cetacean distribution, use of habitat, and foraging behavior across space and time [@barlow2007]. As an offshore species associated with deep-water habitats, for Risso's dolphins the CCE provides a biologically meaningful setting in which to explore temporal and geographic variation in the acoustic characteristics of the species within a single, dynamic ecosystem [@barlow2007; @forney1998].
 
 Passive Acoustic monitoring (PAM) is particularly well suiting to address these questions as odontocetes rely heavily on sound for prey detection, navigation, and social interaction, and acoustic methods can identify and record animals in locations and conditions where visuals methods are unable to [@mellinger2003]. In this study, drifting passive acoustic monitoring was utilized to survey acoustic activity throughout the CCE. Drifting PAM is especially valuable because it provides an effective balance between the geographic resolution of towed systems and the temporal resolution of fixed seafloor recorders. With relatively low cost and flexible deployment, broader spatial coverage is achieved, making it especially well suited for surveying mobile and elusive species directly within the water column [@rankin2025]. In a system such as the CCE, drifting PAM allows fine-scale characterization of acoustic patterns that would otherwise be challenging to capture [@rankin2025; @simonis2020].
 
-Risso's dolphin echolocation clicks serve as valuable markers for this kind of analysis as they exhibit distinct spectral banding – specifically recurring peaks and notches in the frequency of the spectra [@soldevilla2008]. These spectral features are hypothesized to reflect the impacts of morphological structures within the sound production and propagation process, and are stable enough to allow for species identification [@cranford1996; @mckenna2012; @soldevilla2008; @soldevilla2010]. More importantly for this study, spectral banding in the echolocation clicks of Risso's dolphins provides a measurable framework for comparison of click structure across encounters, regions, and time [@soldevilla2017]. If spectral characteristics vary systematically, such variation could indicate morphological, behavioral, ecological, or population differences [@soldevilla2008; @soldevilla2017].
+Risso's dolphin echolocation clicks serve as valuable markers for this kind of analysis as they exhibit distinct spectral banding – specifically recurring peaks and notches in the shape of the spectra [@soldevilla2008]. These spectral features are hypothesized to reflect the impacts of morphological structures within the sound production and propagation process, and are stable enough to allow for species identification [@cranford1996; @mckenna2012; @soldevilla2008; @soldevilla2010]. More importantly for this study, spectral banding in the echolocation clicks of Risso's dolphins provides a measurable framework for comparison of click structure across encounters, regions, and time [@soldevilla2017]. If spectral characteristics vary systematically, such variation could indicate morphological, behavioral, ecological, or population differences [@soldevilla2008; @soldevilla2017].
 
-Previous studies by @soldevilla2008, @soldevilla2017 have shown Risso's echolocation clicks to consistently possess spectral banding structure across regions, with frequency value differences suggesting geographic variation. This foundational work established an important baseline for species identification and raised the question as to the possible biological meaning behind click variation. However, while @soldevilla2008, @soldevilla2017 characterize spectral characteristics and variation of Risso's clicks in regions such as the U.S. East Coast, Gulf of Mexico, Hawaiian Islands, and the Southern California Bight, the CCE has not be studied as its own ecosystem-scale case [@rankin2025]. What remains unclear is how spectral structure varies within the CCE itself as an environmentally heterogeneous and ecologically important region [@mcclatchie2025; @soldevilla2017].
+Previous studies by @soldevilla2008, @soldevilla2017 have shown Risso's echolocation clicks to consistently possess spectral banding structure across regions, with banding structure and associated frequency shifts suggesting geographic variation. This foundational work established an important baseline for species identification and raised the question as to the possible biological meaning behind click variation. However, while @soldevilla2008, @soldevilla2017 characterize spectral characteristics and variation of Risso's clicks in regions such as the U.S. East Coast, Gulf of Mexico, Hawaiian Islands, and the Southern California Bight, the CCE has not be studied as its own ecosystem-scale case [@rankin2025]. What remains unclear is how spectral structure varies within the CCE itself as an environmentally heterogeneous and ecologically important region \[@mcclatchie2025; @soldevil
 
-Addressing this knowledge gap is relevant for both management and ecology. Characterization of Risso;s dolphin click spectra across the CCE can improve interpretation of PAM detection, assist in refining regional habitat use understanding, and provide additional context relevant to biological structuring within a broadly managed offshore environment [@barlow2007; @carretta2024; @forney1998; @soldevilla2017]. It also places the CCE in the broader bio-geographic context of pre-existing population variation patterns while establishing the baseline needed to interpret acoustic trends within the ecosystem [@soldevilla2010; @soldevilla2017]. In an era of increasing offshore anthropogenic impact, stronger foundational understanding is both scientifically and practically important across the CCE [@andrews2015; @carretta2024; @vanparijs2023].
+Addressing this knowledge gap is relevant for both management and ecology. Characterization of Risso's dolphin click spectra across the CCE can improve interpretation of PAM detection, assist in refining regional habitat use understanding, and provide additional context relevant to biological structuring within a broadly managed offshore environment [@barlow2007; @carretta2024; @forney1998; @soldevilla2017]. It also places the CCE in the broader bio-geographic context of pre-existing population variation patterns while establishing the baseline needed to interpret acoustic trends within the ecosystem [@soldevilla2010; @soldevilla2017]. In an era of increasing offshore anthropogenic impact, stronger foundational understanding is both scientifically and practically important across the CCE [@andrews2015; @carretta2024; @vanparijs2023].
 
-This study examines the echolocation clicks of Risso's dolphins within the CCE and serves as the first comprehensive assessment of Risso’s dolphin click characteristics across the CCE – enabling comparison with other U.S. regions where click-type divergence has been observed. First, spectral peaks and notches were identified from a broad dataset to characterize banding in the spectra of recorded clicks. Next, clustering analyses were applied to identify recurring spectral structure across encounters. Finally, spectral characteristic were temporally and spatiall evaluated within the CCE and compared with patterns previously described by @soldevilla2017.
+This study examines the echolocation clicks of Risso's dolphins within the CCE and serves as the first comprehensive assessment of Risso’s dolphin click characteristics across the CCE – enabling comparison with other US regions where click-type divergence has been observed. First, click events were screened for quality through manual inspection to exclude background noise and non-target signals, and spectra were smoothed to enhance consistent banding structure. Next, clustering analyses were applied to identify recurring spectral structure across encounters. Finally, spectral characteristics were temporally and spatially evaluated within the CCE and compared with patterns previously described by @soldevilla2017.
 
 # II. Materials and Methods
 
-## A. Field Sites and Acoustic Survey Design
+## A. Field Sites, Acoustic Survey Design, and Data Collection
 
-Recordings of Risso's dolphins were collected via floating passive acoustic monitoring recorders deployed throughout the California Current Ecosystem (CCE) during three NOAA surveys; Passive Acoustic Survey of Cetaceans Abundance Levels (PASCAL-2016), California Current Ecosystem Survey (CCES-2018), and Adrift in the California Current (ADRIFT-2020-2023).
+The acoustic data used in this study were collected as part of three off-shore acoustic surveys conducted by National Oceanographic and Atmospheric Administration Southwest Fisheries Science Center (NOAA SWFSC) and the Bureau of Ocean Energy Management (BOEM) [@rankin2025]. For this study, field data collection was not involved; instead, it makes use of the collected PAM datatsets generated during these coordinated inter-agency efforts.
 
-Detailed information can be found in the ADRIFT report @rankin2025
+The first survey, Adrift in the California Current ("Adrift", 2020-2023), study area covers the CCE, reaching from Point Conception, California to Newport, Oregon, and includes focal regions oriented within proposed wind energy areas (WEA): Oregon, Northern California (Humboldt), Central California (Morro Bay), and offshore San Francisco. To increase coverage spatially and temporally, data from two earlier drifting acoustic surveys – Passive Acoustic Survey of Cetaceans Abundance Levels (PASCAL, 2016) and California Current Ecosystem Survey (CCES, 2018) – were included alongside the Adrift deployments [@rankin2025].
+
+The acoustic recordings used from these surveys were collected using drifting passive acoustic recorders made up of a bouy and satellite GPS at the surface, with a vertically suspended hydrophone array and autonomous recorder positioned at depth. The devices were designed to flow freely with the currents while continuously keeping the recording instruments deep enough to reduce surface noise contamination [@rankin2025].
+
+The hydrophone array was deployed approximately 100-150 meters down in the water column and was composed of two vertically spaced hydrophones placed approximately 5 meters apart allowing for improved acoustic detections using triangulation. The recording components were programmed to sample continuously at high sample rates (≥288 kHz), allowing for broadband acoustic signals to be captured [@rankin2025]. **To ensure comparability across deployments, this study is restricted to recordings collected using SoundTrap recorders equipped with a consistent hydrophone model. This works to minimize variability in factors that could otherwise negate comparisons of acoustic detections.**
+
+The drifting acoustic recorders were tracked via the GPS surface bouys, allowing for the reconstruction, visualization, and analysis of the drift trajectories and spatial context. Recorders were deployed as individual drifts or as part of a cluster, dependent upon survey design, with the clustered deployments facilitating better spatial understanding of acoustic detections [@rankin2025].
+
+Due to the off-shore nature of the acoustic surveys, environmental conditions, such as strong currents and surface motion, sometimes introduced self-noise (e.g. strumming of the array), and was considered during later data quality assessment and pre-processing by NOAA analysts [@rankin2025].
 
 ## B. Signal Processing and Click Feature Extraction
+
+NOAA analysts went through the collected data and identified Risso's detections for all three surveys
 
 MATLAB click detectors (specific parameters?) creating databases and binaries
 
@@ -121,7 +95,7 @@ Data files also created with the values of the peaks and notches per click in ea
 
 Events that did not display spectral banding were removed
 
-Events with less than \_\_\_ clicks exhibiting spectral banding were removed from further analysis
+Events with less than 100 clicks exhibiting spectral banding were removed from further analysis
 
 ### *2. Spectral Feature Clustering and Geographic Variation*
 
@@ -140,6 +114,16 @@ Explored 6 different "types of clustering":
 
     -   HDBSCAN:
 
+After filtering from 0.01-0.4 ICI clicks out we retain 214,944 clicks (about 62.5% of the dataset) and remove 111,570 likely buzz/very short ICI clicks (about 32.4%) 
+
+The joint PCA–ICI–UMAP–HDBSCAN workflow identified three major clusters and three smaller peripheral clusters. The major clusters differed primarily in ICI regime and secondarily in spectral shape: cluster 5 contained short-ICI clicks with smoother broadband spectra, cluster 4 contained longer-ICI clicks with stronger low-mid frequency emphasis and high-frequency rolloff, and cluster 6 contained longer-ICI clicks with more elevated upper-frequency structure. Smaller clusters 1–3 showed more localized spectral patterns but should be interpreted cautiously due to small sample sizes.
+
+Reducing ICI weight to 0.5× or 0.25× collapsed most points into a single dominant cluster, suggesting that ICI is necessary for resolving the joint spectral-temporal density structure. However, this also indicates that the main 1× clustering should be interpreted as timing-influenced rather than purely spectral.
+
+At low minPts values (10), HDBSCAN fragmented the embedding into many small local density clusters, suggesting substantial fine-scale local structure within the UMAP embedding. However, increasing density conservativeness (30–50) consistently recovered three dominant density regimes with similar proportions and organization. This suggests that the major spectral-temporal structure is relatively robust to moderate HDBSCAN parameter variation, while smaller local subclusters are less stable.
+
+18PC + 1× scaled logICI + UMAP + HDBSCAN(minPts = 50)
+
 ### *3. Testing Geographic Structure in Echolocation Click Types Against Pre-existing Regional Variation*
 
 # III. Results
@@ -156,4 +140,4 @@ Soldevilla et al. 2017 used the following sections: Species Identification, Geog
 
 # V. Conclusions
 
-# Acknowledgements
+# 
