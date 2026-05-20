@@ -1,0 +1,1263 @@
+---
+title: "Peak_Notch_Boxplots_By_Click_Type"
+author: "Sarah Moseley"
+date: "2026-05-09"
+output: html_document
+---
+
+## Setup
+
+```{r setup}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+required_packages <- c(
+  "dplyr",
+  "ggplot2",
+  "tidyr",
+  "readr",
+  "purrr",
+  "tibble",
+  "stringr",
+  "scales"
+)
+
+missing_packages <- required_packages[
+  !sapply(required_packages, requireNamespace, quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages)
+}
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(readr)
+library(purrr)
+library(tibble)
+library(stringr)
+library(scales)
+
+cat("Setup complete.\n")
+
+```
+
+## User Settings and Output Folders
+
+```{r user_settings}
+
+# ------------------------------------------------------------
+# Input files
+# ------------------------------------------------------------
+
+# Main HDBSCAN assignments file from the selected analysis
+# This should contain RowID, DriftID/EventID, and HDBSCAN_cluster.
+hdbscan_assignments_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables/PRIMARY_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv"
+
+# Cluster mean spectra table from the selected analysis
+# This should contain HDBSCAN_cluster, Frequency_kHz, mean_minmax_spectrum.
+cluster_mean_spectra_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables/clean_cluster_mean_spectra_18PC_scaledICI_1_minPts50.csv"
+
+# ------------------------------------------------------------
+# Output directory
+# ------------------------------------------------------------
+
+base_output_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/Peak_Notch_Boxplots_With_Soldevilla"
+
+plot_dir <- file.path(base_output_dir, "plots")
+table_dir <- file.path(base_output_dir, "tables")
+data_dir <- file.path(base_output_dir, "data")
+
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Analysis labels
+# ------------------------------------------------------------
+
+analysis_label <- "18PC + 1x scaled logICI; minPts = 50"
+comparison_regions <- c("Soldevilla PPac", "Soldevilla CC")
+
+cat("Input HDBSCAN file:\n")
+cat(hdbscan_assignments_file, "\n\n")
+
+cat("Input cluster mean spectra file:\n")
+cat(cluster_mean_spectra_file, "\n\n")
+
+cat("Outputs will save to:\n")
+cat(base_output_dir, "\n")
+
+```
+
+## Load Data
+
+```{r load_data}
+
+# ------------------------------------------------------------
+# Load HDBSCAN assignments
+# ------------------------------------------------------------
+
+primary_hdbscan <- read_csv(
+  hdbscan_assignments_file,
+  show_col_types = FALSE
+)
+
+cat("Loaded HDBSCAN assignments.\n")
+cat("Rows:", nrow(primary_hdbscan), "\n\n")
+
+# ------------------------------------------------------------
+# Load cluster mean spectra
+# ------------------------------------------------------------
+
+cluster_mean_spectra <- read_csv(
+  cluster_mean_spectra_file,
+  show_col_types = FALSE
+)
+
+cat("Loaded cluster mean spectra.\n")
+cat("Rows:", nrow(cluster_mean_spectra), "\n\n")
+
+# ------------------------------------------------------------
+# Convert cluster labels to character
+# ------------------------------------------------------------
+
+primary_hdbscan <- primary_hdbscan %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+cluster_mean_spectra <- cluster_mean_spectra %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+# ------------------------------------------------------------
+# Basic sanity checks
+# ------------------------------------------------------------
+
+cat("Unique clusters in HDBSCAN table:\n")
+print(sort(unique(primary_hdbscan$HDBSCAN_cluster)))
+
+cat("\nUnique clusters in spectra table:\n")
+print(sort(unique(cluster_mean_spectra$HDBSCAN_cluster)))
+
+# ------------------------------------------------------------
+# Check required columns
+# ------------------------------------------------------------
+
+required_hdbscan_cols <- c(
+  "HDBSCAN_cluster",
+  "DriftID_spectra",
+  "EventID"
+)
+
+required_spectra_cols <- c(
+  "HDBSCAN_cluster",
+  "Frequency_kHz",
+  "mean_minmax_spectrum"
+)
+
+missing_hdbscan_cols <- setdiff(
+  required_hdbscan_cols,
+  names(primary_hdbscan)
+)
+
+missing_spectra_cols <- setdiff(
+  required_spectra_cols,
+  names(cluster_mean_spectra)
+)
+
+if (length(missing_hdbscan_cols) > 0) {
+  
+  stop(
+    "Missing columns in HDBSCAN table: ",
+    paste(missing_hdbscan_cols, collapse = ", ")
+  )
+}
+
+if (length(missing_spectra_cols) > 0) {
+  
+  stop(
+    "Missing columns in spectra table: ",
+    paste(missing_spectra_cols, collapse = ", ")
+  )
+}
+
+cat("\nPASS: Required columns detected.\n")
+
+# ------------------------------------------------------------
+# Preview tables
+# ------------------------------------------------------------
+
+cat("\nPreview HDBSCAN table:\n")
+print(head(primary_hdbscan))
+
+cat("\nPreview spectra table:\n")
+print(head(cluster_mean_spectra))
+
+```
+
+## Load Sampled Spectra Matrix and Frequency Grid
+
+```{r load_sampled_spectra_matrix}
+
+# ------------------------------------------------------------
+# Input file needed to rebuild drift-by-cluster spectra
+# ------------------------------------------------------------
+
+sampled_spectra_matrix_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/data/sampled_minmax_spectra_matrix_19_50_khz_18PC.rds"
+
+# ------------------------------------------------------------
+# Load sampled min-max spectra matrix
+# rows should match primary_hdbscan rows
+# columns should match frequency bins
+# ------------------------------------------------------------
+
+sampled_spectra_matrix <- readRDS(sampled_spectra_matrix_file)
+
+cat("Loaded sampled spectra matrix.\n")
+cat("Dimensions:\n")
+print(dim(sampled_spectra_matrix))
+
+# ------------------------------------------------------------
+# Use frequency grid from already-loaded cluster mean spectra table
+# ------------------------------------------------------------
+
+freq_focus <- cluster_mean_spectra %>%
+  distinct(Frequency_kHz) %>%
+  arrange(Frequency_kHz) %>%
+  pull(Frequency_kHz)
+
+cat("\nFrequency range:\n")
+cat(min(freq_focus), "to", max(freq_focus), "kHz\n")
+
+cat("\nNumber of frequency bins:", length(freq_focus), "\n")
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+if (nrow(sampled_spectra_matrix) != nrow(primary_hdbscan)) {
+  stop(
+    "FAIL: sampled_spectra_matrix rows do not match primary_hdbscan rows.\n",
+    "Matrix rows: ", nrow(sampled_spectra_matrix), "\n",
+    "HDBSCAN rows: ", nrow(primary_hdbscan)
+  )
+}
+
+if (ncol(sampled_spectra_matrix) != length(freq_focus)) {
+  stop(
+    "FAIL: sampled_spectra_matrix columns do not match frequency grid.\n",
+    "Matrix columns: ", ncol(sampled_spectra_matrix), "\n",
+    "Frequency bins: ", length(freq_focus)
+  )
+}
+
+cat("\nPASS: Sampled spectra matrix aligns with HDBSCAN table and frequency grid.\n")
+
+```
+
+## Build Drift-by-Cluster Mean Spectra
+
+```{r build_drift_cluster_mean_spectra}
+
+# ------------------------------------------------------------
+# Add row index to HDBSCAN table
+# ------------------------------------------------------------
+
+primary_hdbscan_indexed <- primary_hdbscan %>%
+  mutate(
+    MatrixRow = row_number(),
+    DriftID = DriftID_spectra,
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+# ------------------------------------------------------------
+# Minimum clicks required to calculate a drift-cluster spectrum
+# ------------------------------------------------------------
+
+min_clicks_per_drift_cluster <- 5
+
+# ------------------------------------------------------------
+# Build mean spectrum for each DriftID x cluster
+# ------------------------------------------------------------
+
+drift_cluster_groups <- primary_hdbscan_indexed %>%
+  group_by(DriftID, HDBSCAN_cluster) %>%
+  summarise(
+    row_ids = list(MatrixRow),
+    n_clicks = n(),
+    n_events = n_distinct(EventID),
+    .groups = "drop"
+  ) %>%
+  filter(n_clicks >= min_clicks_per_drift_cluster)
+
+cat("Number of DriftID x cluster groups retained:\n")
+print(nrow(drift_cluster_groups))
+
+cat("\nSummary of clicks per retained DriftID x cluster group:\n")
+print(summary(drift_cluster_groups$n_clicks))
+
+drift_cluster_mean_spectra <- purrr::map_dfr(
+  seq_len(nrow(drift_cluster_groups)),
+  function(i) {
+    
+    rows_i <- drift_cluster_groups$row_ids[[i]]
+    
+    mean_spectrum_i <- colMeans(
+      sampled_spectra_matrix[rows_i, , drop = FALSE],
+      na.rm = TRUE
+    )
+    
+    tibble(
+      DriftID = drift_cluster_groups$DriftID[i],
+      HDBSCAN_cluster = drift_cluster_groups$HDBSCAN_cluster[i],
+      n_clicks = drift_cluster_groups$n_clicks[i],
+      n_events = drift_cluster_groups$n_events[i],
+      Frequency_kHz = freq_focus,
+      mean_minmax_spectrum = mean_spectrum_i
+    )
+  }
+)
+
+cat("\nRows in drift-cluster mean spectra table:\n")
+print(nrow(drift_cluster_mean_spectra))
+
+cat("\nPreview:\n")
+print(head(drift_cluster_mean_spectra))
+
+# ------------------------------------------------------------
+# Save table
+# ------------------------------------------------------------
+
+write.csv(
+  drift_cluster_mean_spectra,
+  file = file.path(
+    table_dir,
+    "drift_cluster_mean_spectra_min5clicks.csv"
+  ),
+  row.names = FALSE
+)
+
+saveRDS(
+  drift_cluster_mean_spectra,
+  file = file.path(
+    data_dir,
+    "drift_cluster_mean_spectra_min5clicks.rds"
+  )
+)
+
+cat("\nPASS: Drift-by-cluster mean spectra created and saved.\n")
+
+```
+
+## Peak and Notch Picking for Drift-by-Cluster Spectra
+
+```{r peak_notch_picking_drift_cluster}
+
+# ------------------------------------------------------------
+# Peak/notch picking parameters
+# SAME methodology as your previous workflow
+# ------------------------------------------------------------
+
+peak_nups <- 2
+peak_ndowns <- 2
+peak_min_distance <- 3
+peak_min_height <- 0.15
+
+notch_nups <- 2
+notch_ndowns <- 2
+notch_min_distance <- 3
+notch_max_height <- 0.85
+
+# ------------------------------------------------------------
+# Function to pick peaks/notches from one drift-cluster spectrum
+# ------------------------------------------------------------
+
+pick_features_one_spectrum <- function(one_spectrum_df) {
+  
+  one_spectrum_df <- one_spectrum_df %>%
+    arrange(Frequency_kHz)
+  
+  y <- one_spectrum_df$mean_minmax_spectrum
+  
+  # ----------------------------------------------------------
+  # Peaks
+  # ----------------------------------------------------------
+  
+  peak_matrix <- pracma::findpeaks(
+    y,
+    nups = peak_nups,
+    ndowns = peak_ndowns,
+    minpeakdistance = peak_min_distance,
+    minpeakheight = peak_min_height
+  )
+  
+  if (is.null(peak_matrix)) {
+    
+    peaks_df <- tibble()
+    
+  } else {
+    
+    peaks_df <- tibble(
+      DriftID = one_spectrum_df$DriftID[1],
+      HDBSCAN_cluster = one_spectrum_df$HDBSCAN_cluster[1],
+      n_clicks = one_spectrum_df$n_clicks[1],
+      feature_type = "Peak",
+      Frequency_kHz = one_spectrum_df$Frequency_kHz[peak_matrix[, 2]],
+      feature_height = y[peak_matrix[, 2]]
+    ) %>%
+      arrange(Frequency_kHz) %>%
+      mutate(
+        feature_rank = row_number()
+      ) %>%
+      filter(feature_rank <= 4)
+  }
+  
+  # ----------------------------------------------------------
+  # Notches
+  # ----------------------------------------------------------
+  
+  notch_matrix <- pracma::findpeaks(
+    -y,
+    nups = notch_nups,
+    ndowns = notch_ndowns,
+    minpeakdistance = notch_min_distance
+  )
+  
+  if (is.null(notch_matrix)) {
+    
+    notches_df <- tibble()
+    
+  } else {
+    
+    notches_df <- tibble(
+      DriftID = one_spectrum_df$DriftID[1],
+      HDBSCAN_cluster = one_spectrum_df$HDBSCAN_cluster[1],
+      n_clicks = one_spectrum_df$n_clicks[1],
+      feature_type = "Notch",
+      Frequency_kHz = one_spectrum_df$Frequency_kHz[notch_matrix[, 2]],
+      feature_height = y[notch_matrix[, 2]]
+    ) %>%
+      filter(feature_height <= notch_max_height) %>%
+      arrange(Frequency_kHz) %>%
+      mutate(
+        feature_rank = row_number()
+      ) %>%
+      filter(feature_rank <= 3)
+  }
+  
+  bind_rows(peaks_df, notches_df)
+}
+
+# ------------------------------------------------------------
+# Split spectra by DriftID x cluster
+# ------------------------------------------------------------
+
+drift_cluster_split <- drift_cluster_mean_spectra %>%
+  group_split(DriftID, HDBSCAN_cluster)
+
+cat("Number of spectra to peak-pick:\n")
+print(length(drift_cluster_split))
+
+# ------------------------------------------------------------
+# Run peak/notch picking
+# ------------------------------------------------------------
+
+drift_cluster_features <- purrr::map_dfr(
+  drift_cluster_split,
+  pick_features_one_spectrum
+)
+
+# ------------------------------------------------------------
+# Create feature labels
+# ------------------------------------------------------------
+
+drift_cluster_features <- drift_cluster_features %>%
+  mutate(
+    feature_label = paste0(feature_type, " ", feature_rank),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+# ------------------------------------------------------------
+# Save table
+# ------------------------------------------------------------
+
+write.csv(
+  drift_cluster_features,
+  file = file.path(
+    table_dir,
+    "drift_cluster_peak_notch_features.csv"
+  ),
+  row.names = FALSE
+)
+
+saveRDS(
+  drift_cluster_features,
+  file = file.path(
+    data_dir,
+    "drift_cluster_peak_notch_features.rds"
+  )
+)
+
+# ------------------------------------------------------------
+# Summaries
+# ------------------------------------------------------------
+
+cat("\nFeature counts by type:\n")
+
+print(
+  drift_cluster_features %>%
+    count(feature_label)
+)
+
+cat("\nPreview:\n")
+
+print(head(drift_cluster_features))
+
+cat("\nPASS: Drift-cluster peak/notch features created.\n")
+
+```
+
+## Soldevilla Reference Values
+
+```{r soldevilla_reference_values}
+
+# ------------------------------------------------------------
+# Soldevilla et al. reference means and SDs from Table IV
+# Regions used here:
+#   PPac = Pelagic Pacific
+#   CC   = California Current
+#
+# These are summary statistics, not raw data.
+# We will plot them as mean ± SD reference points/error bars,
+# not as boxplots.
+# ------------------------------------------------------------
+
+soldevilla_reference <- tibble(
+  comparison_group = rep(
+    c("Soldevilla PPac", "Soldevilla CC"),
+    each = 7
+  ),
+  feature_label = rep(
+    c(
+      "Peak 1", "Peak 2", "Peak 3", "Peak 4",
+      "Notch 1", "Notch 2", "Notch 3"
+    ),
+    times = 2
+  ),
+  feature_type = rep(
+    c(
+      "Peak", "Peak", "Peak", "Peak",
+      "Notch", "Notch", "Notch"
+    ),
+    times = 2
+  ),
+  feature_rank = rep(
+    c(1, 2, 3, 4, 1, 2, 3),
+    times = 2
+  ),
+  mean_frequency_khz = c(
+    # PPac
+    23.5, 26.6, 31.7, 36.0,
+    25.4, 28.7, 33.5,
+    
+    # CC
+    21.8, 24.8, 31.2, 37.9,
+    23.4, 27.0, 34.5
+  ),
+  sd_frequency_khz = c(
+    # PPac
+    0.9, 1.5, 0.6, 2.1,
+    0.9, 1.2, 0.8,
+    
+    # CC
+    1.0, 1.0, 1.0, 2.3,
+    1.2, 0.9, 1.3
+  )
+) %>%
+  mutate(
+    lower_sd = mean_frequency_khz - sd_frequency_khz,
+    upper_sd = mean_frequency_khz + sd_frequency_khz
+  )
+
+# ------------------------------------------------------------
+# Save reference table
+# ------------------------------------------------------------
+
+write.csv(
+  soldevilla_reference,
+  file = file.path(
+    table_dir,
+    "soldevilla_PPAC_CC_reference_values.csv"
+  ),
+  row.names = FALSE
+)
+
+cat("Soldevilla reference values:\n")
+print(soldevilla_reference)
+
+cat("\nPASS: Soldevilla PPac and CC reference values entered and saved.\n")
+
+```
+
+## Boxplots with Soldevilla Reference Values
+
+```{r plot_peak_notch_boxplots}
+
+# ------------------------------------------------------------
+# Feature colors: distinct colors for each peak/notch
+# ------------------------------------------------------------
+
+peak_feature_colors <- c(
+  "Peak 1" = "#0072B2",  # blue
+  "Peak 2" = "#D55E00",  # vermillion
+  "Peak 3" = "#009E73",  # green
+  "Peak 4" = "#CC79A7"   # purple/pink
+)
+
+notch_feature_colors <- c(
+  "Notch 1" = "#56B4E9",  # sky blue
+  "Notch 2" = "#E69F00",  # orange
+  "Notch 3" = "#F0E442"   # yellow
+)
+
+# ------------------------------------------------------------
+# Helper plotting function
+# ------------------------------------------------------------
+
+make_feature_boxplot <- function(
+    feature_type_to_plot,
+    include_cluster0 = TRUE
+) {
+  
+  plot_features <- drift_cluster_features %>%
+    filter(feature_type == feature_type_to_plot)
+  
+  if (!include_cluster0) {
+    plot_features <- plot_features %>%
+      filter(HDBSCAN_cluster != "0")
+  }
+  
+  cluster_levels <- sort(
+    as.numeric(unique(plot_features$HDBSCAN_cluster))
+  ) %>%
+    as.character()
+  
+  x_levels <- c(
+    paste0("Cluster ", cluster_levels),
+    "Soldevilla PPac",
+    "Soldevilla CC"
+  )
+  
+  plot_features <- plot_features %>%
+    mutate(
+      comparison_group = paste0("Cluster ", HDBSCAN_cluster),
+      comparison_group = factor(comparison_group, levels = x_levels),
+      feature_label = factor(
+        feature_label,
+        levels = sort(unique(feature_label))
+      )
+    )
+  
+  soldevilla_plot <- soldevilla_reference %>%
+    filter(feature_type == feature_type_to_plot) %>%
+    mutate(
+      comparison_group = factor(comparison_group, levels = x_levels),
+      feature_label = factor(
+        feature_label,
+        levels = levels(plot_features$feature_label)
+      )
+    )
+  
+  feature_colors <- if (feature_type_to_plot == "Peak") {
+    peak_feature_colors
+  } else {
+    notch_feature_colors
+  }
+  
+  noise_label <- ifelse(
+    include_cluster0,
+    "with cluster 0 included",
+    "with cluster 0 excluded"
+  )
+  
+  p <- ggplot() +
+    geom_boxplot(
+      data = plot_features,
+      aes(
+        x = comparison_group,
+        y = Frequency_kHz,
+        fill = feature_label
+      ),
+      position = position_dodge(width = 0.8),
+      width = 0.65,
+      alpha = 0.85,
+      outlier.shape = 21,
+      outlier.size = 1.5
+    ) +
+    geom_errorbar(
+      data = soldevilla_plot,
+      aes(
+        x = comparison_group,
+        ymin = lower_sd,
+        ymax = upper_sd,
+        group = feature_label
+      ),
+      position = position_dodge(width = 0.8),
+      width = 0.25,
+      linewidth = 0.7,
+      color = "black"
+    ) +
+    geom_point(
+      data = soldevilla_plot,
+      aes(
+        x = comparison_group,
+        y = mean_frequency_khz,
+        group = feature_label,
+        fill = feature_label
+      ),
+      position = position_dodge(width = 0.8),
+      shape = 21,
+      size = 3.2,
+      color = "black"
+    ) +
+    scale_fill_manual(
+      values = feature_colors,
+      drop = FALSE
+    ) +
+    labs(
+      title = paste0(feature_type_to_plot, " Frequencies by HDBSCAN Cluster"),
+      subtitle = paste0(
+        analysis_label,
+        "; ",
+        noise_label,
+        "; Soldevilla shown as mean ± SD"
+      ),
+      x = NULL,
+      y = "Frequency (kHz)",
+      fill = feature_type_to_plot
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "right"
+    )
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Generate plots
+# ------------------------------------------------------------
+
+p_peaks_with_0 <- make_feature_boxplot(
+  feature_type_to_plot = "Peak",
+  include_cluster0 = TRUE
+)
+
+p_peaks_no_0 <- make_feature_boxplot(
+  feature_type_to_plot = "Peak",
+  include_cluster0 = FALSE
+)
+
+p_notches_with_0 <- make_feature_boxplot(
+  feature_type_to_plot = "Notch",
+  include_cluster0 = TRUE
+)
+
+p_notches_no_0 <- make_feature_boxplot(
+  feature_type_to_plot = "Notch",
+  include_cluster0 = FALSE
+)
+
+print(p_peaks_with_0)
+print(p_peaks_no_0)
+print(p_notches_with_0)
+print(p_notches_no_0)
+
+# ------------------------------------------------------------
+# Save plots
+# ------------------------------------------------------------
+
+ggsave(
+  filename = file.path(plot_dir, "peak_boxplots_WITH_cluster0_with_soldevilla.png"),
+  plot = p_peaks_with_0,
+  width = 12,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(plot_dir, "peak_boxplots_NO_cluster0_with_soldevilla.png"),
+  plot = p_peaks_no_0,
+  width = 11,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(plot_dir, "notch_boxplots_WITH_cluster0_with_soldevilla.png"),
+  plot = p_notches_with_0,
+  width = 12,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(plot_dir, "notch_boxplots_NO_cluster0_with_soldevilla.png"),
+  plot = p_notches_no_0,
+  width = 11,
+  height = 7,
+  dpi = 300
+)
+
+cat("\nDONE. Saved peak/notch boxplots to:\n")
+cat(plot_dir, "\n")
+
+```
+
+-------------------------------------------------
+
+## Plotting by cluster
+
+```{r}
+
+required_packages <- c(
+  "dplyr",
+  "ggplot2",
+  "tidyr",
+  "readr",
+  "purrr",
+  "tibble",
+  "stringr",
+  "scales",
+  "pracma"
+)
+
+```
+
+## Point Plots from Cluster Mean Spectra with Soldevilla Reference
+
+```{r point_plots_cluster_mean_features}
+
+# ------------------------------------------------------------
+# Peak/notch picking parameters
+# SAME as your previous workflow
+# ------------------------------------------------------------
+
+peak_nups <- 2
+peak_ndowns <- 2
+peak_min_distance <- 3
+peak_min_height <- 0.15
+
+notch_nups <- 2
+notch_ndowns <- 2
+notch_min_distance <- 3
+notch_max_height <- 0.85
+
+# ------------------------------------------------------------
+# Function to pick features from one cluster mean spectrum
+# ------------------------------------------------------------
+
+pick_features_one_cluster_mean <- function(one_spectrum_df) {
+  
+  one_spectrum_df <- one_spectrum_df %>%
+    arrange(Frequency_kHz)
+  
+  y <- one_spectrum_df$mean_minmax_spectrum
+  
+  cluster_id <- one_spectrum_df$HDBSCAN_cluster[1]
+  
+  # --------------------------
+  # Peaks
+  # --------------------------
+  
+  peak_matrix <- pracma::findpeaks(
+    y,
+    nups = peak_nups,
+    ndowns = peak_ndowns,
+    minpeakdistance = peak_min_distance,
+    minpeakheight = peak_min_height
+  )
+  
+  if (is.null(peak_matrix)) {
+    
+    peaks_df <- tibble()
+    
+  } else {
+    
+    peaks_df <- tibble(
+      HDBSCAN_cluster = cluster_id,
+      feature_type = "Peak",
+      Frequency_kHz = one_spectrum_df$Frequency_kHz[peak_matrix[, 2]],
+      feature_height = y[peak_matrix[, 2]]
+    ) %>%
+      arrange(Frequency_kHz) %>%
+      mutate(feature_rank = row_number()) %>%
+      filter(feature_rank <= 4)
+  }
+  
+  # --------------------------
+  # Notches
+  # --------------------------
+  
+  notch_matrix <- pracma::findpeaks(
+    -y,
+    nups = notch_nups,
+    ndowns = notch_ndowns,
+    minpeakdistance = notch_min_distance
+  )
+  
+  if (is.null(notch_matrix)) {
+    
+    notches_df <- tibble()
+    
+  } else {
+    
+    notches_df <- tibble(
+      HDBSCAN_cluster = cluster_id,
+      feature_type = "Notch",
+      Frequency_kHz = one_spectrum_df$Frequency_kHz[notch_matrix[, 2]],
+      feature_height = y[notch_matrix[, 2]]
+    ) %>%
+      filter(feature_height <= notch_max_height) %>%
+      arrange(Frequency_kHz) %>%
+      mutate(feature_rank = row_number()) %>%
+      filter(feature_rank <= 3)
+  }
+  
+  bind_rows(peaks_df, notches_df)
+}
+
+# ------------------------------------------------------------
+# Run feature picking on cluster mean spectra
+# ------------------------------------------------------------
+
+cluster_mean_features <- cluster_mean_spectra %>%
+  group_split(HDBSCAN_cluster) %>%
+  purrr::map_dfr(pick_features_one_cluster_mean) %>%
+  mutate(
+    feature_label = paste0(feature_type, " ", feature_rank),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  ) %>%
+  arrange(
+    as.numeric(HDBSCAN_cluster),
+    feature_type,
+    feature_rank
+  )
+
+cat("Cluster mean picked features:\n")
+print(cluster_mean_features, n = Inf)
+
+write.csv(
+  cluster_mean_features,
+  file = file.path(
+    table_dir,
+    "cluster_mean_peak_notch_features_for_point_plot.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Distinct feature colors
+# ------------------------------------------------------------
+
+peak_feature_colors <- c(
+  "Peak 1" = "#0072B2",
+  "Peak 2" = "#D55E00",
+  "Peak 3" = "#009E73",
+  "Peak 4" = "#CC79A7"
+)
+
+notch_feature_colors <- c(
+  "Notch 1" = "#0072B2",
+  "Notch 2" = "#D55E00",
+  "Notch 3" = "#009E73"
+)
+
+# ------------------------------------------------------------
+# Helper function for point plots
+# ------------------------------------------------------------
+
+make_cluster_mean_point_plot <- function(
+    feature_type_to_plot,
+    include_cluster0 = TRUE
+) {
+  
+  plot_features <- cluster_mean_features %>%
+    filter(feature_type == feature_type_to_plot)
+  
+  if (!include_cluster0) {
+    plot_features <- plot_features %>%
+      filter(HDBSCAN_cluster != "0")
+  }
+  
+  cluster_levels <- sort(
+    as.numeric(unique(plot_features$HDBSCAN_cluster))
+  ) %>%
+    as.character()
+  
+  x_levels <- c(
+    paste0("Cluster ", cluster_levels),
+    "Soldevilla PPac",
+    "Soldevilla CC"
+  )
+  
+  plot_features <- plot_features %>%
+    mutate(
+      comparison_group = paste0("Cluster ", HDBSCAN_cluster),
+      comparison_group = factor(comparison_group, levels = x_levels),
+      feature_label = factor(
+        feature_label,
+        levels = names(
+          if (feature_type_to_plot == "Peak") peak_feature_colors else notch_feature_colors
+        )
+      )
+    )
+  
+  soldevilla_plot <- soldevilla_reference %>%
+    filter(feature_type == feature_type_to_plot) %>%
+    mutate(
+      comparison_group = factor(comparison_group, levels = x_levels),
+      feature_label = factor(
+        feature_label,
+        levels = levels(plot_features$feature_label)
+      )
+    )
+  
+  feature_colors <- if (feature_type_to_plot == "Peak") {
+    peak_feature_colors
+  } else {
+    notch_feature_colors
+  }
+  
+  noise_label <- ifelse(
+    include_cluster0,
+    "with cluster 0 included",
+    "with cluster 0 excluded"
+  )
+  
+  p <- ggplot() +
+    geom_point(
+      data = plot_features,
+      aes(
+        x = comparison_group,
+        y = Frequency_kHz,
+        color = feature_label
+      ),
+      position = position_dodge(width = 0.65),
+      size = 3.8,
+      alpha = 0.95
+    ) +
+    geom_errorbar(
+      data = soldevilla_plot,
+      aes(
+        x = comparison_group,
+        ymin = lower_sd,
+        ymax = upper_sd,
+        color = feature_label
+      ),
+      position = position_dodge(width = 0.65),
+      width = 0.22,
+      linewidth = 0.75
+    ) +
+    geom_point(
+      data = soldevilla_plot,
+      aes(
+        x = comparison_group,
+        y = mean_frequency_khz,
+        color = feature_label
+      ),
+      position = position_dodge(width = 0.65),
+      size = 4.2,
+      shape = 18
+    ) +
+    scale_color_manual(
+      values = feature_colors,
+      drop = FALSE
+    ) +
+    labs(
+      title = paste0(feature_type_to_plot, " Frequencies from Cluster Mean Spectra"),
+      subtitle = paste0(
+        analysis_label,
+        "; ",
+        noise_label,
+        "; Soldevilla shown as mean ± SD"
+      ),
+      x = NULL,
+      y = "Frequency (kHz)",
+      color = feature_type_to_plot
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "right"
+    )
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Generate four plots
+# ------------------------------------------------------------
+
+p_peak_points_with_0 <- make_cluster_mean_point_plot(
+  feature_type_to_plot = "Peak",
+  include_cluster0 = TRUE
+)
+
+p_peak_points_no_0 <- make_cluster_mean_point_plot(
+  feature_type_to_plot = "Peak",
+  include_cluster0 = FALSE
+)
+
+p_notch_points_with_0 <- make_cluster_mean_point_plot(
+  feature_type_to_plot = "Notch",
+  include_cluster0 = TRUE
+)
+
+p_notch_points_no_0 <- make_cluster_mean_point_plot(
+  feature_type_to_plot = "Notch",
+  include_cluster0 = FALSE
+)
+
+print(p_peak_points_with_0)
+print(p_peak_points_no_0)
+print(p_notch_points_with_0)
+print(p_notch_points_no_0)
+
+# ------------------------------------------------------------
+# Save plots
+# ------------------------------------------------------------
+
+ggsave(
+  filename = file.path(plot_dir, "peak_POINTPLOT_cluster_means_WITH_cluster0_with_soldevilla.png"),
+  plot = p_peak_points_with_0,
+  width = 12,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(plot_dir, "peak_POINTPLOT_cluster_means_NO_cluster0_with_soldevilla.png"),
+  plot = p_peak_points_no_0,
+  width = 11,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(plot_dir, "notch_POINTPLOT_cluster_means_WITH_cluster0_with_soldevilla.png"),
+  plot = p_notch_points_with_0,
+  width = 12,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = file.path(plot_dir, "notch_POINTPLOT_cluster_means_NO_cluster0_with_soldevilla.png"),
+  plot = p_notch_points_no_0,
+  width = 11,
+  height = 7,
+  dpi = 300
+)
+
+cat("\nDONE. Saved point plots to:\n")
+cat(plot_dir, "\n")
+
+```
+
+
+```{r}
+
+# ------------------------------------------------------------
+# Cluster 7: event-level occurrence AND click-level abundance
+# ------------------------------------------------------------
+
+target_cluster <- "4"
+
+# Total unique events
+total_events <- primary_hdbscan %>%
+  distinct(EventID) %>%
+  nrow()
+
+# Events containing at least one cluster-7 click
+events_with_target_cluster <- primary_hdbscan %>%
+  filter(HDBSCAN_cluster == target_cluster) %>%
+  distinct(EventID) %>%
+  nrow()
+
+percent_events_with_target_cluster <-
+  100 * events_with_target_cluster / total_events
+
+# Total clicks
+total_clicks <- nrow(primary_hdbscan)
+
+# Cluster-7 clicks
+clicks_in_target_cluster <- primary_hdbscan %>%
+  filter(HDBSCAN_cluster == target_cluster) %>%
+  nrow()
+
+percent_clicks_in_target_cluster <-
+  100 * clicks_in_target_cluster / total_clicks
+
+# Print summary
+cat("Target cluster:", target_cluster, "\n\n")
+
+cat("EVENT-LEVEL OCCURRENCE\n")
+cat("Total events:", total_events, "\n")
+cat("Events containing cluster", target_cluster, ":", events_with_target_cluster, "\n")
+cat("Percent of events containing cluster", target_cluster, ":",
+    round(percent_events_with_target_cluster, 2), "%\n\n")
+
+cat("CLICK-LEVEL ABUNDANCE\n")
+cat("Total clicks:", total_clicks, "\n")
+cat("Clicks assigned to cluster", target_cluster, ":", clicks_in_target_cluster, "\n")
+cat("Percent of clicks assigned to cluster", target_cluster, ":",
+    round(percent_clicks_in_target_cluster, 2), "%\n")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
