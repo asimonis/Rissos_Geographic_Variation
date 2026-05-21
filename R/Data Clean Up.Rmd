@@ -1,0 +1,270 @@
+---
+title: "Data Clean Up"
+author: "Sarah Moseley"
+date: "2026-05-21"
+output: html_document
+---
+
+```{r}
+
+library(readr)
+library(dplyr)
+library(purrr)
+library(tibble)
+library(digest)
+
+table_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables"
+
+csv_files <- list.files(
+  table_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+# ------------------------------------------------------------
+# 1. Inventory every CSV
+# ------------------------------------------------------------
+
+safe_read <- function(path) {
+  read_csv(path, show_col_types = FALSE, progress = FALSE)
+}
+
+file_inventory <- map_dfr(csv_files, function(path) {
+  df <- safe_read(path)
+  
+  tibble(
+    file = basename(path),
+    size_bytes = file.info(path)$size,
+    modified = file.info(path)$mtime,
+    n_rows = nrow(df),
+    n_cols = ncol(df),
+    columns = paste(names(df), collapse = " | "),
+    md5_file_hash = digest(file = path, algo = "md5")
+  )
+})
+
+print(file_inventory, n = Inf)
+
+write_csv(
+  file_inventory,
+  file.path(table_dir, "AUDIT_file_inventory.csv")
+)
+
+# ------------------------------------------------------------
+# 2. Compare likely duplicate groups
+# ------------------------------------------------------------
+
+compare_csv_pair <- function(file_a, file_b, tolerance = 1e-10) {
+  
+  path_a <- file.path(table_dir, file_a)
+  path_b <- file.path(table_dir, file_b)
+  
+  if (!file.exists(path_a) || !file.exists(path_b)) {
+    return(tibble(
+      file_a = file_a,
+      file_b = file_b,
+      status = "one_or_both_files_missing",
+      same_dimensions = NA,
+      same_columns = NA,
+      same_file_hash = NA,
+      same_values = NA
+    ))
+  }
+  
+  a <- safe_read(path_a)
+  b <- safe_read(path_b)
+  
+  same_dimensions <- identical(dim(a), dim(b))
+  same_columns <- identical(names(a), names(b))
+  same_file_hash <- identical(
+    digest(file = path_a, algo = "md5"),
+    digest(file = path_b, algo = "md5")
+  )
+  
+  same_values <- FALSE
+  
+  if (same_dimensions && same_columns) {
+    comparison <- all.equal(a, b, tolerance = tolerance, check.attributes = FALSE)
+    same_values <- isTRUE(comparison)
+  }
+  
+  tibble(
+    file_a = file_a,
+    file_b = file_b,
+    status = case_when(
+      same_file_hash ~ "exact_same_file_contents",
+      same_values ~ "same_values_after_reading",
+      same_dimensions && same_columns ~ "same_shape_columns_but_values_differ",
+      same_dimensions && !same_columns ~ "same_shape_but_columns_differ",
+      TRUE ~ "different_shape"
+    ),
+    same_dimensions = same_dimensions,
+    same_columns = same_columns,
+    same_file_hash = same_file_hash,
+    same_values = same_values
+  )
+}
+
+pairs_to_check <- tribble(
+  ~file_a, ~file_b,
+  
+  "hdbscan_results_18PC_scaledICI_1_minPts50.csv",
+  "PRIMARY_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv",
+  
+  "hdbscan_results_18PC_scaledICI_1_minPts50.csv",
+  "FULL_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv",
+  
+  "PRIMARY_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv",
+  "FULL_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv",
+  
+  "hdbscan_cluster_summary_18PC_scaledICI_1_minPts50.csv",
+  "FULL_cluster_summary_18PC_scaledICI_1_minPts50.csv",
+  
+  "cluster_mean_spectra_18PC_scaledICI_1_minPts50.csv",
+  "clean_cluster_mean_spectra_18PC_scaledICI_1_minPts50.csv",
+  
+  "clean_cluster_mean_spectra_18PC_scaledICI_1_minPts50.csv",
+  "FULL_cluster_mean_spectra_18PC_scaledICI_1_minPts50.csv"
+)
+
+comparison_results <- pmap_dfr(
+  pairs_to_check,
+  compare_csv_pair
+)
+
+print(comparison_results, n = Inf)
+
+write_csv(
+  comparison_results,
+  file.path(table_dir, "AUDIT_likely_duplicate_comparisons.csv")
+)
+
+```
+
+```{r}
+
+library(readr)
+library(dplyr)
+
+table_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables"
+
+old <- read_csv(
+  file.path(table_dir, "hdbscan_cluster_summary_18PC_scaledICI_1_minPts50.csv"),
+  show_col_types = FALSE
+)
+
+full <- read_csv(
+  file.path(table_dir, "FULL_cluster_summary_18PC_scaledICI_1_minPts50.csv"),
+  show_col_types = FALSE
+)
+
+old_clean <- old %>%
+  arrange(as.numeric(as.character(HDBSCAN_cluster))) %>%
+  select(HDBSCAN_cluster, n_clicks, percent_clicks, Analysis, minPts)
+
+full_clean <- full %>%
+  arrange(as.numeric(as.character(HDBSCAN_cluster))) %>%
+  select(HDBSCAN_cluster, n_clicks, percent_clicks, Analysis, minPts)
+
+all.equal(old_clean, full_clean, tolerance = 1e-10)
+
+old %>%
+  arrange(as.numeric(as.character(HDBSCAN_cluster))) %>%
+  select(HDBSCAN_cluster, cluster_type)
+
+full %>%
+  arrange(as.numeric(as.character(HDBSCAN_cluster))) %>%
+  select(HDBSCAN_cluster, cluster_type)
+
+```
+
+```{r}
+
+# ------------------------------------------------------------
+# Create curated "Usable tables" folder from scratch
+# Primary minPts50 outputs only
+# ------------------------------------------------------------
+
+source_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables"
+
+usable_dir <- file.path(source_dir, "Usable tables")
+
+# Check that the source folder exists
+if (!dir.exists(source_dir)) {
+  stop("Source folder does not exist:\n", source_dir)
+}
+
+# Create Usable tables folder
+dir.create(
+  usable_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Curated primary tables only
+files_to_copy <- c(
+  "FULL_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv",
+  "FULL_cluster_summary_18PC_scaledICI_1_minPts50.csv",
+  "FULL_ici_summary_by_cluster_18PC_scaledICI_1_minPts50.csv",
+  "FULL_cluster_mean_spectra_18PC_scaledICI_1_minPts50.csv",
+  "all_clusters_pickpeaks_and_notches_mean_spectra.csv"
+)
+
+source_paths <- file.path(source_dir, files_to_copy)
+destination_paths <- file.path(usable_dir, files_to_copy)
+
+# Check that all source files exist
+missing_files <- files_to_copy[!file.exists(source_paths)]
+
+if (length(missing_files) > 0) {
+  stop(
+    "These files are missing from the source folder:\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+# Copy files
+copied <- file.copy(
+  from = source_paths,
+  to = destination_paths,
+  overwrite = TRUE
+)
+
+if (!all(copied)) {
+  stop("Some files failed to copy.")
+}
+
+# Verify copied files
+copied_inventory <- data.frame(
+  file = list.files(usable_dir, pattern = "\\.csv$", full.names = FALSE),
+  size_bytes = file.info(
+    list.files(usable_dir, pattern = "\\.csv$", full.names = TRUE)
+  )$size,
+  stringsAsFactors = FALSE
+)
+
+print(copied_inventory)
+
+cat("\nCreated folder and copied", nrow(copied_inventory), "usable primary tables to:\n")
+cat(usable_dir, "\n")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

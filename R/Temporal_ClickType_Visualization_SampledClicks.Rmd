@@ -1,0 +1,1297 @@
+---
+title: "Temporal_ClickType_Visualization_SampledClicks"
+author: "Sarah Moseley"
+date: "2026-05-21"
+output: html_document
+---
+
+## Overall Tempral Click-Type
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+# ------------------------------------------------------------
+# Input: sampled click-level HDBSCAN assignments
+# ------------------------------------------------------------
+
+assignments_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables/Usable tables/FULL_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv"
+
+plot_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/plots/temporal_cluster_plots"
+
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+clicks <- read_csv(assignments_file, show_col_types = FALSE)
+
+# ------------------------------------------------------------
+# Cluster colors used throughout workflow
+# ------------------------------------------------------------
+
+cluster_colors <- c(
+  "0" = "grey80",
+  "1" = "#E41A1C",
+  "2" = "#FF7F00",
+  "3" = "#FFD92F",
+  "4" = "#4DAF4A",
+  "5" = "#00BFC4",
+  "6" = "#377EB8",
+  "7" = "#984EA3",
+  "8" = "#F781BF",
+  "9" = "#A65628"
+)
+
+# ------------------------------------------------------------
+# Build relative time within each event
+# ------------------------------------------------------------
+
+clicks_temporal <- clicks %>%
+  mutate(
+    HDBSCAN_cluster = factor(
+      as.character(HDBSCAN_cluster),
+      levels = as.character(0:9)
+    ),
+    Final_UTC_ms = as.numeric(Final_UTC_ms)
+  ) %>%
+  group_by(EventID) %>%
+  arrange(Final_UTC_ms, .by_group = TRUE) %>%
+  mutate(
+    seconds_since_event_start = (Final_UTC_ms - min(Final_UTC_ms, na.rm = TRUE)) / 1000
+  ) %>%
+  ungroup()
+
+# ------------------------------------------------------------
+# Plot: when each click type appears in each event
+# ------------------------------------------------------------
+
+p_temporal_clusters <- ggplot(
+  clicks_temporal,
+  aes(
+    x = seconds_since_event_start,
+    y = HDBSCAN_cluster,
+    color = HDBSCAN_cluster
+  )
+) +
+  geom_point(
+    size = 0.8,
+    alpha = 0.75,
+    position = position_jitter(height = 0.12, width = 0)
+  ) +
+  facet_wrap(~ EventID, scales = "free_x") +
+  scale_color_manual(values = cluster_colors, drop = FALSE) +
+  labs(
+    title = "Temporal Occurrence of HDBSCAN Click Types by Event",
+    subtitle = "Sampled clicks only; 18PC + 1x scaled logICI; minPts = 50",
+    x = "Seconds since event start",
+    y = "HDBSCAN cluster",
+    color = "Cluster"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    legend.position = "bottom"
+  )
+
+print(p_temporal_clusters)
+
+ggsave(
+  filename = file.path(plot_dir, "temporal_click_types_by_event_sampled_clicks.png"),
+  plot = p_temporal_clusters,
+  width = 16,
+  height = 12,
+  dpi = 300
+)
+
+```
+
+## Bearing source audit: targeted folder scan
+
+```{r}
+
+library(dplyr)
+library(stringr)
+library(readr)
+library(purrr)
+library(tibble)
+
+search_roots <- c(
+  "E:/Analysis/Useable Databases",
+  "E:/Analysis/CleanAcousticStudies",
+  "E:/Analysis/Binaries"
+)
+
+search_roots <- search_roots[dir.exists(search_roots)]
+
+cat("Searching these folders:\n")
+print(search_roots)
+
+all_files <- unlist(
+  lapply(search_roots, function(root) {
+    list.files(root, recursive = TRUE, full.names = TRUE)
+  })
+)
+
+file_inventory <- tibble(
+  file = all_files,
+  folder = dirname(all_files),
+  filename = basename(all_files),
+  extension = tolower(tools::file_ext(all_files)),
+  size_mb = round(file.info(all_files)$size / 1024^2, 3),
+  modified = file.info(all_files)$mtime
+)
+
+candidate_files <- file_inventory %>%
+  filter(
+    str_detect(
+      filename,
+      regex(
+        "bearing|angle|local|loc|click|det|pam|target|motion|hydro|array|event|database|sqlite|db",
+        ignore_case = TRUE
+      )
+    ) |
+      extension %in% c("sqlite", "sqlite3", "db", "database", "csv", "txt", "tsv")
+  ) %>%
+  arrange(extension, filename)
+
+print(candidate_files, n = Inf)
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+dir.create(audit_dir, recursive = TRUE, showWarnings = FALSE)
+
+write_csv(
+  candidate_files,
+  file.path(audit_dir, "candidate_bearing_source_files.csv")
+)
+
+cat("\nSaved candidate file inventory to:\n")
+cat(file.path(audit_dir, "candidate_bearing_source_files.csv"), "\n")
+
+```
+
+## Inspect SQLite database schemas for bearing / angle / localization fields
+
+```{r}
+
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tibble)
+library(readr)
+library(DBI)
+library(RSQLite)
+
+# ------------------------------------------------------------
+# Search only the clean/useable databases first
+# ------------------------------------------------------------
+
+db_dir <- "E:/Analysis/Useable Databases"
+
+db_files <- list.files(
+  db_dir,
+  pattern = "\\.sqlite3$",
+  full.names = TRUE
+)
+
+cat("SQLite databases found:", length(db_files), "\n")
+print(basename(db_files))
+
+# ------------------------------------------------------------
+# Patterns we care about
+# ------------------------------------------------------------
+
+bearing_pattern <- regex(
+  "bearing|bear|angle|theta|azimuth|azi|deg|degree|degrees",
+  ignore_case = TRUE
+)
+
+localization_pattern <- regex(
+  "locali|loc|target|motion|hydro|array|heading|direction",
+  ignore_case = TRUE
+)
+
+time_pattern <- regex(
+  "time|utc|date|millis|millisecond|msec|timestamp",
+  ignore_case = TRUE
+)
+
+id_pattern <- regex(
+  "uid|event|click|databaseindex|id",
+  ignore_case = TRUE
+)
+
+# ------------------------------------------------------------
+# Helper: safely count rows in a table
+# ------------------------------------------------------------
+
+safe_count_rows <- function(con, table_name) {
+  out <- tryCatch({
+    qtbl <- DBI::dbQuoteIdentifier(con, table_name)
+    DBI::dbGetQuery(con, paste0("SELECT COUNT(*) AS n FROM ", qtbl))$n[1]
+  }, error = function(e) {
+    NA_integer_
+  })
+  
+  out
+}
+
+# ------------------------------------------------------------
+# Helper: scan one database
+# ------------------------------------------------------------
+
+scan_one_db_schema <- function(db_path) {
+  
+  con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  
+  tables <- DBI::dbListTables(con)
+  
+  map_dfr(tables, function(tbl) {
+    
+    fields <- tryCatch(
+      DBI::dbListFields(con, tbl),
+      error = function(e) character(0)
+    )
+    
+    n_rows <- safe_count_rows(con, tbl)
+    
+    tibble(
+      database_file = db_path,
+      database_name = basename(db_path),
+      table_name = tbl,
+      n_rows = n_rows,
+      column_name = fields
+    )
+  })
+}
+
+# ------------------------------------------------------------
+# Scan all database schemas
+# ------------------------------------------------------------
+
+db_schema_inventory <- map_dfr(db_files, scan_one_db_schema) %>%
+  mutate(
+    bearing_match = str_detect(column_name, bearing_pattern),
+    localization_match = str_detect(column_name, localization_pattern),
+    time_match = str_detect(column_name, time_pattern),
+    id_match = str_detect(column_name, id_pattern),
+    any_relevant_match = bearing_match | localization_match | time_match | id_match
+  )
+
+# ------------------------------------------------------------
+# Table-level summary: which tables look promising?
+# ------------------------------------------------------------
+
+promising_tables <- db_schema_inventory %>%
+  group_by(database_name, database_file, table_name, n_rows) %>%
+  summarise(
+    bearing_columns = paste(column_name[bearing_match], collapse = " | "),
+    localization_columns = paste(column_name[localization_match], collapse = " | "),
+    time_columns = paste(column_name[time_match], collapse = " | "),
+    id_columns = paste(column_name[id_match], collapse = " | "),
+    n_bearing_cols = sum(bearing_match),
+    n_localization_cols = sum(localization_match),
+    n_time_cols = sum(time_match),
+    n_id_cols = sum(id_match),
+    all_columns = paste(column_name, collapse = " | "),
+    .groups = "drop"
+  ) %>%
+  filter(
+    n_bearing_cols > 0 |
+      n_localization_cols > 0 |
+      n_time_cols > 0 |
+      n_id_cols > 0
+  ) %>%
+  arrange(
+    desc(n_bearing_cols),
+    desc(n_localization_cols),
+    desc(n_time_cols),
+    desc(n_id_cols),
+    database_name,
+    table_name
+  )
+
+cat("\nPromising tables:\n")
+print(promising_tables, n = Inf)
+
+# ------------------------------------------------------------
+# Strong candidates: tables with possible bearing/angle columns
+# ------------------------------------------------------------
+
+bearing_candidate_tables <- promising_tables %>%
+  filter(n_bearing_cols > 0 | n_localization_cols > 0)
+
+cat("\nStrong bearing/localization candidate tables:\n")
+print(bearing_candidate_tables, n = Inf)
+
+# ------------------------------------------------------------
+# Save outputs
+# ------------------------------------------------------------
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+dir.create(audit_dir, recursive = TRUE, showWarnings = FALSE)
+
+write_csv(
+  db_schema_inventory,
+  file.path(audit_dir, "sqlite_schema_inventory_all_columns.csv")
+)
+
+write_csv(
+  promising_tables,
+  file.path(audit_dir, "sqlite_promising_tables_uid_time_bearing.csv")
+)
+
+write_csv(
+  bearing_candidate_tables,
+  file.path(audit_dir, "sqlite_bearing_localization_candidate_tables.csv")
+)
+
+cat("\nSaved schema audit files to:\n")
+cat(audit_dir, "\n")
+
+```
+
+## Join sampled HDBSCAN clicks to Click_Detector_OfflineClicks
+## Goal: confirm database UID match and identify relevant PAMGuard binary files
+
+```{r}
+
+library(dplyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(tibble)
+library(DBI)
+library(RSQLite)
+
+# ------------------------------------------------------------
+# Inputs
+# ------------------------------------------------------------
+
+assignments_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables/Usable tables/FULL_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv"
+
+db_dir <- "E:/Analysis/Useable Databases"
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+dir.create(audit_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Load sampled labeled clicks
+# ------------------------------------------------------------
+
+sampled_clicks <- read_csv(assignments_file, show_col_types = FALSE) %>%
+  mutate(
+    UID = as.character(UID),
+    DriftID_clean = DriftID_spectra
+  )
+
+cat("Sampled labeled clicks:", nrow(sampled_clicks), "\n")
+cat("Unique drifts:", n_distinct(sampled_clicks$DriftID_clean), "\n\n")
+
+# ------------------------------------------------------------
+# Get database files
+# Database names look like: ADRIFT_003 - Clean.sqlite3
+# Drift IDs look like: ADRIFT_003
+# ------------------------------------------------------------
+
+db_files <- list.files(
+  db_dir,
+  pattern = "\\.sqlite3$",
+  full.names = TRUE
+)
+
+db_lookup <- tibble(
+  database_file = db_files,
+  database_name = basename(db_files),
+  DriftID_clean = str_remove(basename(db_files), " - Clean\\.sqlite3$")
+)
+
+print(db_lookup)
+
+# ------------------------------------------------------------
+# Helper: read Click_Detector_OfflineClicks from one database
+# ------------------------------------------------------------
+
+read_offline_clicks <- function(database_file, DriftID_clean) {
+  
+  con <- dbConnect(SQLite(), database_file)
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  tables <- dbListTables(con)
+  
+  if (!"Click_Detector_OfflineClicks" %in% tables) {
+    warning("No Click_Detector_OfflineClicks table in: ", basename(database_file))
+    return(tibble())
+  }
+  
+  available_cols <- dbListFields(con, "Click_Detector_OfflineClicks")
+  
+  wanted_cols <- c(
+    "Id",
+    "UID",
+    "UTC",
+    "UTCMilliseconds",
+    "PCLocalTime",
+    "PCTime",
+    "parentID",
+    "parentUID",
+    "LongDataName",
+    "BinaryFile",
+    "EventId",
+    "ClickNo",
+    "Amplitude",
+    "Channels"
+  )
+  
+  cols_to_pull <- intersect(wanted_cols, available_cols)
+  
+  query <- paste0(
+    "SELECT ",
+    paste(DBI::dbQuoteIdentifier(con, cols_to_pull), collapse = ", "),
+    " FROM ",
+    DBI::dbQuoteIdentifier(con, "Click_Detector_OfflineClicks")
+  )
+  
+  out <- dbGetQuery(con, query) %>%
+    as_tibble() %>%
+    mutate(
+      UID = as.character(UID),
+      DriftID_clean = DriftID_clean,
+      database_name = basename(database_file),
+      database_file = database_file
+    )
+  
+  return(out)
+}
+
+# ------------------------------------------------------------
+# Read offline click metadata from all usable databases
+# ------------------------------------------------------------
+
+offline_clicks_all <- pmap_dfr(
+  db_lookup,
+  function(database_file, database_name, DriftID_clean) {
+    cat("Reading:", database_name, "\n")
+    read_offline_clicks(database_file, DriftID_clean)
+  }
+)
+
+cat("\nOffline click rows read:", nrow(offline_clicks_all), "\n")
+cat("Unique UIDs in offline clicks:", n_distinct(offline_clicks_all$UID), "\n\n")
+
+# ------------------------------------------------------------
+# Join sampled labels to offline click metadata
+# ------------------------------------------------------------
+
+sampled_with_offline_clicks <- sampled_clicks %>%
+  left_join(
+    offline_clicks_all,
+    by = c("DriftID_clean", "UID"),
+    suffix = c("_sampled", "_db")
+  )
+
+join_summary <- sampled_with_offline_clicks %>%
+  summarise(
+    n_sampled_clicks = n(),
+    n_joined_to_offline_clicks = sum(!is.na(BinaryFile)),
+    n_missing_offline_click_match = sum(is.na(BinaryFile)),
+    percent_joined = 100 * n_joined_to_offline_clicks / n_sampled_clicks
+  )
+
+cat("\nJoin summary:\n")
+print(join_summary)
+
+# ------------------------------------------------------------
+# Check join by event
+# ------------------------------------------------------------
+
+join_summary_by_event <- sampled_with_offline_clicks %>%
+  group_by(DriftID_clean, EventID) %>%
+  summarise(
+    n_sampled_clicks = n(),
+    n_joined = sum(!is.na(BinaryFile)),
+    n_missing = sum(is.na(BinaryFile)),
+    percent_joined = 100 * n_joined / n_sampled_clicks,
+    .groups = "drop"
+  ) %>%
+  arrange(percent_joined, DriftID_clean, EventID)
+
+cat("\nJoin summary by event:\n")
+print(join_summary_by_event, n = Inf)
+
+# ------------------------------------------------------------
+# Which binary files contain the sampled clicks?
+# ------------------------------------------------------------
+
+sampled_binary_files <- sampled_with_offline_clicks %>%
+  filter(!is.na(BinaryFile)) %>%
+  count(DriftID_clean, database_name, BinaryFile, name = "n_sampled_clicks") %>%
+  arrange(DriftID_clean, desc(n_sampled_clicks))
+
+cat("\nBinary files represented in sampled clicks:\n")
+print(sampled_binary_files, n = Inf)
+
+# ------------------------------------------------------------
+# Save outputs
+# ------------------------------------------------------------
+
+write_csv(
+  sampled_with_offline_clicks,
+  file.path(audit_dir, "sampled_hdbscan_clicks_joined_to_offline_clicks.csv")
+)
+
+write_csv(
+  join_summary,
+  file.path(audit_dir, "sampled_to_offline_clicks_join_summary.csv")
+)
+
+write_csv(
+  join_summary_by_event,
+  file.path(audit_dir, "sampled_to_offline_clicks_join_summary_by_event.csv")
+)
+
+write_csv(
+  sampled_binary_files,
+  file.path(audit_dir, "sampled_clicks_relevant_binary_files.csv")
+)
+
+cat("\nSaved outputs to:\n")
+cat(audit_dir, "\n")
+
+```
+
+## Locate relevant PAMGuard binary files on disk
+
+```{r}
+
+library(dplyr)
+library(readr)
+library(stringr)
+library(tibble)
+library(purrr)
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+binary_root <- "E:/Analysis/Binaries"
+
+sampled_binary_files <- read_csv(
+  file.path(audit_dir, "sampled_clicks_relevant_binary_files.csv"),
+  show_col_types = FALSE
+)
+
+# ------------------------------------------------------------
+# Find all binary-like files under the binary root
+# ------------------------------------------------------------
+
+all_binary_paths <- list.files(
+  binary_root,
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+binary_inventory <- tibble(
+  full_path = all_binary_paths,
+  filename = basename(all_binary_paths),
+  extension = tolower(tools::file_ext(all_binary_paths)),
+  size_mb = round(file.info(all_binary_paths)$size / 1024^2, 3),
+  modified = file.info(all_binary_paths)$mtime
+)
+
+# ------------------------------------------------------------
+# Match required .pgdf files
+# ------------------------------------------------------------
+
+matched_pgdf <- sampled_binary_files %>%
+  left_join(
+    binary_inventory,
+    by = c("BinaryFile" = "filename")
+  ) %>%
+  mutate(
+    pgdf_found = !is.na(full_path),
+    expected_pgdx = str_replace(BinaryFile, "\\.pgdf$", ".pgdx")
+  )
+
+# ------------------------------------------------------------
+# Match expected .pgdx sidecar files
+# ------------------------------------------------------------
+
+pgdx_lookup <- binary_inventory %>%
+  filter(extension == "pgdx") %>%
+  select(
+    expected_pgdx = filename,
+    pgdx_full_path = full_path,
+    pgdx_size_mb = size_mb
+  )
+
+matched_binary_pairs <- matched_pgdf %>%
+  left_join(
+    pgdx_lookup,
+    by = "expected_pgdx"
+  ) %>%
+  mutate(
+    pgdx_found = !is.na(pgdx_full_path)
+  )
+
+# ------------------------------------------------------------
+# Summaries
+# ------------------------------------------------------------
+
+binary_match_summary <- matched_binary_pairs %>%
+  summarise(
+    n_binary_file_rows = n(),
+    n_unique_pgdf_needed = n_distinct(BinaryFile),
+    n_pgdf_found = n_distinct(BinaryFile[pgdf_found]),
+    n_pgdf_missing = n_distinct(BinaryFile[!pgdf_found]),
+    n_pgdx_found = n_distinct(expected_pgdx[pgdx_found]),
+    n_pgdx_missing = n_distinct(expected_pgdx[!pgdx_found])
+  )
+
+cat("\nBinary match summary:\n")
+print(binary_match_summary)
+
+cat("\nMissing .pgdf files:\n")
+print(
+  matched_binary_pairs %>%
+    filter(!pgdf_found) %>%
+    distinct(DriftID_clean, BinaryFile),
+  n = Inf
+)
+
+cat("\nMissing .pgdx files:\n")
+print(
+  matched_binary_pairs %>%
+    filter(!pgdx_found) %>%
+    distinct(DriftID_clean, expected_pgdx),
+  n = Inf
+)
+
+# ------------------------------------------------------------
+# Save outputs
+# ------------------------------------------------------------
+
+write_csv(
+  matched_binary_pairs,
+  file.path(audit_dir, "sampled_clicks_relevant_binary_files_matched_to_disk.csv")
+)
+
+write_csv(
+  binary_match_summary,
+  file.path(audit_dir, "sampled_clicks_binary_file_match_summary.csv")
+)
+
+cat("\nSaved binary matching outputs to:\n")
+cat(audit_dir, "\n")
+
+```
+
+## Create a compact manifest of relevant PAMGuard binary files
+
+```{r}
+
+library(dplyr)
+library(readr)
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+matched_binary_pairs <- read_csv(
+  file.path(audit_dir, "sampled_clicks_relevant_binary_files_matched_to_disk.csv"),
+  show_col_types = FALSE
+)
+
+binary_manifest <- matched_binary_pairs %>%
+  filter(pgdf_found, pgdx_found) %>%
+  distinct(
+    DriftID_clean,
+    database_name,
+    BinaryFile,
+    full_path,
+    expected_pgdx,
+    pgdx_full_path
+  ) %>%
+  arrange(DriftID_clean, BinaryFile)
+
+write_csv(
+  binary_manifest,
+  file.path(audit_dir, "PAMGuard_binary_manifest_for_bearing_export.csv")
+)
+
+print(binary_manifest, n = Inf)
+
+cat("\nSaved manifest to:\n")
+cat(file.path(audit_dir, "PAMGuard_binary_manifest_for_bearing_export.csv"), "\n")
+
+---------------------------------------------
+
+library(dplyr)
+library(readr)
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+manifest <- read_csv(
+  file.path(audit_dir, "PAMGuard_binary_manifest_for_bearing_export.csv"),
+  show_col_types = FALSE
+)
+
+manifest %>%
+  count(BinaryFile, name = "n_manifest_rows") %>%
+  filter(n_manifest_rows > 1) %>%
+  arrange(desc(n_manifest_rows)) %>%
+  print(n = Inf)
+
+manifest %>%
+  group_by(BinaryFile) %>%
+  filter(n() > 1) %>%
+  select(DriftID_clean, BinaryFile, full_path, pgdx_full_path) %>%
+  arrange(BinaryFile, DriftID_clean, full_path) %>%
+  print(n = Inf)
+
+manifest %>%
+  group_by(BinaryFile) %>%
+  filter(n() > 1) %>%
+  select(
+    DriftID_clean,
+    BinaryFile,
+    full_path,
+    pgdx_full_path
+  ) %>%
+  arrange(BinaryFile, DriftID_clean, full_path, pgdx_full_path) %>%
+  print(n = Inf)
+
+```
+
+## Clean PAMGuard binary manifest for bearing export
+## Keep only rows where BOTH the .pgdf and .pgdx paths match the DriftID_clean folder
+
+```{r}
+
+library(dplyr)
+library(readr)
+library(stringr)
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+manifest <- read_csv(
+  file.path(audit_dir, "PAMGuard_binary_manifest_for_bearing_export.csv"),
+  show_col_types = FALSE
+)
+
+manifest_clean <- manifest %>%
+  mutate(
+    full_path_norm = str_replace_all(full_path, "\\\\", "/"),
+    pgdx_full_path_norm = str_replace_all(pgdx_full_path, "\\\\", "/"),
+    drift_folder_pattern = paste0("/", DriftID_clean, "/"),
+    pgdf_path_matches_drift = str_detect(full_path_norm, fixed(drift_folder_pattern)),
+    pgdx_path_matches_drift = str_detect(pgdx_full_path_norm, fixed(drift_folder_pattern))
+  ) %>%
+  filter(
+    pgdf_path_matches_drift,
+    pgdx_path_matches_drift
+  ) %>%
+  distinct(
+    DriftID_clean,
+    database_name,
+    BinaryFile,
+    full_path,
+    expected_pgdx,
+    pgdx_full_path
+  ) %>%
+  arrange(DriftID_clean, BinaryFile)
+
+manifest_clean_summary <- manifest_clean %>%
+  summarise(
+    n_rows = n(),
+    n_unique_drifts = n_distinct(DriftID_clean),
+    n_unique_pgdf_files = n_distinct(BinaryFile),
+    n_unique_pgdf_paths = n_distinct(full_path),
+    n_unique_pgdx_paths = n_distinct(pgdx_full_path)
+  )
+
+print(manifest_clean_summary)
+
+write_csv(
+  manifest_clean,
+  file.path(audit_dir, "PAMGuard_binary_manifest_for_bearing_export_CLEAN.csv")
+)
+
+cat("\nSaved cleaned manifest to:\n")
+cat(file.path(audit_dir, "PAMGuard_binary_manifest_for_bearing_export_CLEAN.csv"), "\n")
+
+```
+
+## Smoke test: inspect one PAMGuard binary file for bearing/localization fields
+
+```{r}
+
+library(dplyr)
+library(readr)
+library(stringr)
+
+# Install/load PamBinaries
+# This reads PAMGuard .pgdf binary files into R.
+if (!requireNamespace("PamBinaries", quietly = TRUE)) {
+  install.packages("PamBinaries")
+}
+
+library(PamBinaries)
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+manifest_clean <- read_csv(
+  file.path(audit_dir, "PAMGuard_binary_manifest_for_bearing_export_CLEAN.csv"),
+  show_col_types = FALSE
+)
+
+# Pick one binary file to inspect
+test_pgdf <- manifest_clean$full_path[1]
+
+cat("Testing binary file:\n")
+cat(test_pgdf, "\n\n")
+
+# Load the PAMGuard binary
+# skipLarge = TRUE avoids pulling huge waveform-like objects if possible.
+pg <- PamBinaries::loadPamguardBinaryFile(
+  fileName = test_pgdf,
+  skipLarge = TRUE,
+  convertDate = TRUE
+)
+
+# Convert to data frame
+pg_df <- as.data.frame(pg)
+
+cat("Rows read:", nrow(pg_df), "\n")
+cat("Columns read:", ncol(pg_df), "\n\n")
+
+cat("All column names:\n")
+print(names(pg_df))
+
+# Look for likely useful fields
+candidate_cols <- names(pg_df)[
+  str_detect(
+    names(pg_df),
+    regex("uid|time|utc|millis|binary|bear|angle|theta|azimuth|azi|loc|channel|amp", ignore_case = TRUE)
+  )
+]
+
+cat("\nCandidate UID/time/bearing/localization columns:\n")
+print(candidate_cols)
+
+cat("\nPreview of candidate columns:\n")
+print(
+  pg_df %>%
+    select(any_of(candidate_cols)) %>%
+    head(20)
+)
+
+```
+
+## Extract PAMGuard angles from relevant binaries and join to sampled HDBSCAN clicks
+
+```{r}
+
+library(dplyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(tibble)
+library(ggplot2)
+library(PamBinaries)
+
+# ------------------------------------------------------------
+# Paths
+# ------------------------------------------------------------
+
+audit_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/temporal_visualizations/bearing_source_audit"
+
+plot_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/plots/temporal_cluster_plots"
+
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+manifest_file <- file.path(
+  audit_dir,
+  "PAMGuard_binary_manifest_for_bearing_export_CLEAN.csv"
+)
+
+sampled_joined_file <- file.path(
+  audit_dir,
+  "sampled_hdbscan_clicks_joined_to_offline_clicks.csv"
+)
+
+# ------------------------------------------------------------
+# Load sampled HDBSCAN clicks already joined to OfflineClicks
+# This file has HDBSCAN_cluster + EventID + UID + BinaryFile
+# ------------------------------------------------------------
+
+sampled_clicks <- read_csv(sampled_joined_file, show_col_types = FALSE) %>%
+  mutate(
+    UID = as.character(UID),
+    BinaryFile = as.character(BinaryFile),
+    DriftID_clean = as.character(DriftID_clean),
+    HDBSCAN_cluster = factor(
+      as.character(HDBSCAN_cluster),
+      levels = as.character(0:9)
+    )
+  )
+
+needed_click_keys <- sampled_clicks %>%
+  distinct(DriftID_clean, BinaryFile, UID)
+
+cat("Sampled clicks needing bearing:", nrow(needed_click_keys), "\n")
+
+# ------------------------------------------------------------
+# Load clean binary manifest
+# ------------------------------------------------------------
+
+manifest_clean <- read_csv(manifest_file, show_col_types = FALSE) %>%
+  mutate(
+    DriftID_clean = as.character(DriftID_clean),
+    BinaryFile = as.character(BinaryFile)
+  )
+
+cat("Relevant binary files:", nrow(manifest_clean), "\n")
+
+# ------------------------------------------------------------
+# Helper function: read one PAMGuard .pgdf and keep angle fields
+# ------------------------------------------------------------
+
+read_pgdf_angles <- function(pgdf_path, DriftID_clean, BinaryFile) {
+  
+  cat("Reading:", DriftID_clean, BinaryFile, "\n")
+  
+  out <- tryCatch({
+    
+    pg <- PamBinaries::loadPamguardBinaryFile(
+      fileName = pgdf_path,
+      skipLarge = TRUE,
+      convertDate = TRUE
+    )
+    
+    pg_df <- as.data.frame(pg) %>%
+      as_tibble()
+    
+    # Keep only fields we need
+    pg_df %>%
+      transmute(
+        DriftID_clean = as.character(DriftID_clean),
+        BinaryFile = as.character(BinaryFile),
+        UID = as.character(UID),
+        binary_millis = as.numeric(millis),
+        binary_date = as.character(date),
+        time_delay_s = as.numeric(timeDelays),
+        pamguard_angle_rad = as.numeric(angles),
+        pamguard_angle_error_rad = as.numeric(angleErrors),
+        pamguard_angle_deg = pamguard_angle_rad * 180 / pi,
+        pamguard_angle_error_deg = pamguard_angle_error_rad * 180 / pi,
+        maxAmplitude = as.numeric(maxAmplitude),
+        channelMap = as.integer(channelMap),
+        nChan = as.integer(nChan)
+      )
+    
+  }, error = function(e) {
+    
+    warning("Failed to read: ", pgdf_path, "\n", e$message)
+    
+    tibble(
+      DriftID_clean = character(),
+      BinaryFile = character(),
+      UID = character(),
+      binary_millis = numeric(),
+      binary_date = character(),
+      time_delay_s = numeric(),
+      pamguard_angle_rad = numeric(),
+      pamguard_angle_error_rad = numeric(),
+      pamguard_angle_deg = numeric(),
+      pamguard_angle_error_deg = numeric(),
+      maxAmplitude = numeric(),
+      channelMap = integer(),
+      nChan = integer()
+    )
+  })
+  
+  return(out)
+}
+
+# ------------------------------------------------------------
+# Extract angles from all relevant binaries
+# ------------------------------------------------------------
+binary_angles_all <- pmap_dfr(
+  manifest_clean %>%
+    transmute(
+      pgdf_path = full_path,
+      DriftID_clean = DriftID_clean,
+      BinaryFile = BinaryFile
+    ),
+  read_pgdf_angles
+)
+
+cat("\nRows read from binaries:", nrow(binary_angles_all), "\n")
+
+# ------------------------------------------------------------
+# Keep only the sampled clicks
+# ------------------------------------------------------------
+
+binary_angles_sampled <- binary_angles_all %>%
+  semi_join(
+    needed_click_keys,
+    by = c("DriftID_clean", "BinaryFile", "UID")
+  )
+
+cat("Binary angle rows matching sampled clicks:", nrow(binary_angles_sampled), "\n")
+
+# ------------------------------------------------------------
+# Join angle fields back to sampled HDBSCAN table
+# ------------------------------------------------------------
+
+sampled_with_bearing <- sampled_clicks %>%
+  left_join(
+    binary_angles_sampled,
+    by = c("DriftID_clean", "BinaryFile", "UID")
+  )
+
+bearing_join_summary <- sampled_with_bearing %>%
+  summarise(
+    n_sampled_clicks = n(),
+    n_with_angle = sum(!is.na(pamguard_angle_deg)),
+    n_missing_angle = sum(is.na(pamguard_angle_deg)),
+    percent_with_angle = 100 * n_with_angle / n_sampled_clicks,
+    median_angle_error_deg = median(pamguard_angle_error_deg, na.rm = TRUE),
+    mean_angle_error_deg = mean(pamguard_angle_error_deg, na.rm = TRUE)
+  )
+
+print(bearing_join_summary)
+
+# ------------------------------------------------------------
+# Save joined bearing table
+# ------------------------------------------------------------
+
+write_csv(
+  sampled_with_bearing,
+  file.path(audit_dir, "sampled_hdbscan_clicks_with_pamguard_angles.csv")
+)
+
+write_csv(
+  bearing_join_summary,
+  file.path(audit_dir, "sampled_hdbscan_clicks_bearing_join_summary.csv")
+)
+
+cat("\nSaved joined table to:\n")
+cat(file.path(audit_dir, "sampled_hdbscan_clicks_with_pamguard_angles.csv"), "\n")
+
+sampled_with_bearing %>%
+  summarise(
+    n_rows = n(),
+    n_unique_events = n_distinct(EventID),
+    n_unique_drifts = n_distinct(DriftID_clean),
+    n_unique_uids = n_distinct(paste(DriftID_clean, UID)),
+    n_with_angle = sum(!is.na(pamguard_angle_deg)),
+    n_missing_angle = sum(is.na(pamguard_angle_deg))
+  )
+
+sampled_with_bearing %>%
+  summarise(
+    min_angle_deg = min(pamguard_angle_deg, na.rm = TRUE),
+    q1_angle_deg = quantile(pamguard_angle_deg, 0.25, na.rm = TRUE),
+    median_angle_deg = median(pamguard_angle_deg, na.rm = TRUE),
+    q3_angle_deg = quantile(pamguard_angle_deg, 0.75, na.rm = TRUE),
+    max_angle_deg = max(pamguard_angle_deg, na.rm = TRUE),
+    median_angle_error_deg = median(pamguard_angle_error_deg, na.rm = TRUE),
+    max_angle_error_deg = max(pamguard_angle_error_deg, na.rm = TRUE)
+  )
+
+sampled_with_bearing %>%
+  group_by(EventID) %>%
+  summarise(
+    n_clicks = n(),
+    min_angle_deg = min(pamguard_angle_deg, na.rm = TRUE),
+    median_angle_deg = median(pamguard_angle_deg, na.rm = TRUE),
+    max_angle_deg = max(pamguard_angle_deg, na.rm = TRUE),
+    median_angle_error_deg = median(pamguard_angle_error_deg, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(median_angle_deg) %>%
+  print(n = Inf)
+
+```
+
+## Plotting bearing versus time
+
+```{r}
+
+cluster_colors <- c(
+  "0" = "grey80",
+  "1" = "#E41A1C",
+  "2" = "#FF7F00",
+  "3" = "#FFD92F",
+  "4" = "#4DAF4A",
+  "5" = "#00BFC4",
+  "6" = "#377EB8",
+  "7" = "#984EA3",
+  "8" = "#F781BF",
+  "9" = "#A65628"
+)
+
+bearing_plot_data <- sampled_with_bearing %>%
+  filter(!is.na(pamguard_angle_deg)) %>%
+  mutate(
+    Final_UTC_ms = as.numeric(Final_UTC_ms),
+    HDBSCAN_cluster = factor(
+      as.character(HDBSCAN_cluster),
+      levels = as.character(0:9)
+    )
+  ) %>%
+  group_by(EventID) %>%
+  arrange(Final_UTC_ms, .by_group = TRUE) %>%
+  mutate(
+    seconds_since_event_start = (Final_UTC_ms - min(Final_UTC_ms, na.rm = TRUE)) / 1000
+  ) %>%
+  ungroup()
+
+p_bearing_by_event <- ggplot(
+  bearing_plot_data,
+  aes(
+    x = seconds_since_event_start,
+    y = pamguard_angle_deg,
+    color = HDBSCAN_cluster
+  )
+) +
+  geom_point(
+    size = 0.8,
+    alpha = 0.75
+  ) +
+  facet_wrap(~ EventID, scales = "free_x") +
+  scale_color_manual(values = cluster_colors, drop = FALSE) +
+  labs(
+    title = "Temporal PAMGuard Click Angle by Event",
+    subtitle = "Sampled clicks only; colored by HDBSCAN cluster",
+    x = "Seconds since event start",
+    y = "PAMGuard click angle (degrees)",
+    color = "Cluster"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(p_bearing_by_event)
+
+ggsave(
+  filename = file.path(
+    plot_dir,
+    "temporal_pamguard_angle_by_event_colored_by_cluster.png"
+  ),
+  plot = p_bearing_by_event,
+  width = 16,
+  height = 12,
+  dpi = 300
+)
+
+```
+
+## Plotting bearing versus time excluding noise
+
+```{r}
+
+bearing_plot_no_noise <- sampled_with_bearing %>%
+  filter(
+    !is.na(pamguard_angle_deg),
+    as.character(HDBSCAN_cluster) != "0"
+  ) %>%
+  mutate(
+    Final_UTC_ms = as.numeric(Final_UTC_ms),
+    HDBSCAN_cluster = factor(
+      as.character(HDBSCAN_cluster),
+      levels = as.character(1:9)
+    )
+  ) %>%
+  group_by(EventID) %>%
+  arrange(Final_UTC_ms, .by_group = TRUE) %>%
+  mutate(
+    seconds_since_event_start = (Final_UTC_ms - min(Final_UTC_ms, na.rm = TRUE)) / 1000
+  ) %>%
+  ungroup()
+
+cluster_colors_no_noise <- c(
+  "1" = "#E41A1C",
+  "2" = "#FF7F00",
+  "3" = "#FFD92F",
+  "4" = "#4DAF4A",
+  "5" = "#00BFC4",
+  "6" = "#377EB8",
+  "7" = "#984EA3",
+  "8" = "#F781BF",
+  "9" = "#A65628"
+)
+
+p_bearing_by_event_no_noise <- ggplot(
+  bearing_plot_no_noise,
+  aes(
+    x = seconds_since_event_start,
+    y = pamguard_angle_deg,
+    color = HDBSCAN_cluster
+  )
+) +
+  geom_point(
+    size = 0.8,
+    alpha = 0.75
+  ) +
+  facet_wrap(~ EventID, scales = "free_x") +
+  scale_color_manual(values = cluster_colors_no_noise, drop = FALSE) +
+  labs(
+    title = "Temporal PAMGuard Click Angle by Event (Noise Excluded)",
+    subtitle = "Sampled clicks only; HDBSCAN cluster 0 removed",
+    x = "Seconds since event start",
+    y = "PAMGuard click angle (degrees)",
+    color = "Cluster"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(p_bearing_by_event_no_noise)
+
+ggsave(
+  filename = file.path(
+    plot_dir,
+    "temporal_pamguard_angle_by_event_colored_by_cluster_NO_NOISE.png"
+  ),
+  plot = p_bearing_by_event_no_noise,
+  width = 16,
+  height = 12,
+  dpi = 300
+)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
