@@ -13,7 +13,7 @@ bibliography: references.bib
 
 ## **Authors**
 
-Sarah M.S. Moseley^1^, Marie A. Roch^2^, Shannon Rankin^3^, Cory Hom-Weaver^4^, Ellen Hines^5^, Anne Simonis^6^
+Sarah M.S. Moseley^1^, Marie A. Roch^2^, Shannon Rankin^3^, Cory Hom-Weaver^4^, Ellen Hines^1^, Anne Simonis^1^
 
 ^1^ San Francisco State University
 
@@ -23,13 +23,9 @@ Sarah M.S. Moseley^1^, Marie A. Roch^2^, Shannon Rankin^3^, Cory Hom-Weaver^4^, 
 
 ^4^ Ocean Science Analytics
 
-^5^ San Francisco State University
-
-^6^ San Francisco State University
-
 # Acknowledgements
 
-Committe / Co-authors, EOS Center, Simonis-Hines-Jahncke Lab, BOEM and NOAA for data collection, CSU COAST, ONR for graduate student support, Melissa Soldevilla / Soldevilla et al. 2017
+Committee / Co-authors, EOS Center, Simonis-Hines-Jahncke Lab, BOEM and NOAA for data collection, CSU COAST, ONR for graduate student support, Melissa Soldevilla / Soldevilla et al. 2017, Sara Keen
 
 # I. Introduction
 
@@ -57,9 +53,9 @@ The acoustic data used in this study were collected as part of three off-shore a
 
 The first survey, Adrift in the California Current ("Adrift", 2020-2023), study area covers the CCE, reaching from Point Conception, California to Newport, Oregon, and includes focal regions oriented within proposed wind energy areas (WEA): Oregon, Northern California (Humboldt), Central California (Morro Bay), and offshore San Francisco. To increase coverage spatially and temporally, data from two earlier drifting acoustic surveys – Passive Acoustic Survey of Cetaceans Abundance Levels (PASCAL, 2016) and California Current Ecosystem Survey (CCES, 2018) – were included alongside the Adrift deployments [@rankin2025].
 
-The acoustic recordings used from these surveys were collected using drifting passive acoustic recorders made up of a bouy and satellite GPS at the surface, with a vertically suspended hydrophone array and autonomous recorder positioned at depth. The devices were designed to flow freely with the currents while continuously keeping the recording instruments deep enough to reduce surface noise contamination [@rankin2025].
+The acoustic recordings used from these surveys were collected using drifting passive acoustic recorders made up of a bouy and satellite GPS at the surface, with a vertically suspended hydrophone array and autonomous recorder positioned at depth. The devices were designed to flow freely currents and weather patterns while continuously keeping the recording instruments deep enough to reduce surface noise contamination [@rankin2025].
 
-The hydrophone array was deployed approximately 100-150 meters down in the water column and was composed of two vertically spaced hydrophones placed approximately 5 meters apart allowing for improved acoustic detections using triangulation. The recording components were programmed to sample continuously at high sample rates (≥288 kHz), allowing for broadband acoustic signals to be captured [@rankin2025]. **To ensure comparability across deployments, this study is restricted to recordings collected using SoundTrap recorders equipped with a consistent hydrophone model. This works to minimize variability in factors that could otherwise negate comparisons of acoustic detections.**
+The hydrophone array was deployed approximately 100 meters down in the water column and was composed of two vertically spaced hydrophones placed approximately 5 meters apart allowing for improved acoustic detections using triangulation. The recording components were programmed to sample at a high sample rate of 384 kHz, allowing for broadband acoustic signals to be captured, with the Adrift survey sampling continuously while PASCAL and CCES utilized duty cycling outputting 2 minutes files [@rankin2025]. To ensure comparability across deployments, this study is restricted to recordings collected using SoundTrap recorders equipped with a HTI-92WB hydrophone model. This works to minimize variability in factors that could otherwise negate comparisons of acoustic detections.
 
 The drifting acoustic recorders were tracked via the GPS surface bouys, allowing for the reconstruction, visualization, and analysis of the drift trajectories and spatial context. Recorders were deployed as individual drifts or as part of a cluster, dependent upon survey design, with the clustered deployments facilitating better spatial understanding of acoustic detections [@rankin2025].
 
@@ -69,68 +65,100 @@ Due to the off-shore nature of the acoustic surveys, environmental conditions, s
 
 NOAA analysts went through the collected data and identified Risso's detections for all three surveys
 
-MATLAB click detectors (specific parameters?) creating databases and binaries
+PAMguard click detectors (NOAA parameters) creating databases and binaries and acoustic studies
 
-Generation of concatenated spectrograms and spectra via R
+Generation of concatenated spectrograms and spectra via R for each detection
 
-Visual confirmation of single-species events based upon generated spectrograms and cross comparison between events with Risso's detected and other specie encounters. Removal of any events that overlapped with other species within 20 minutes before and after the Risso's event.
+Confirmation of single-species detections based upon generated spectrograms and cross comparison between events with Risso's detected and other specie encounters as determined by NOAA analysts. Removal of any events that overlapped with other species or came within within 20 minutes before and after the Risso's event.
 
 Copy of each usable database created ("-clean")
 
+PAMguard click detector
+
+Click features (ie ICI, amplitude, frequencies, etc.) claculated via PAMpam R package
+
+Event / detection definition in R studio
+
 Manual click cleaning removing clicks that were not Risso's
 
-Regeneration of concatenated spectrograms and spectra via R with the newly cleaned databases
+Regeneration of concatenated spectrograms and spectra via R with the newly cleaned databases and acoutsic studeies
 
 Liftering (?) explored but didn't make an impact so chose not to use
 
-Smoothing using Tukey and generated Tukey spectra for each event
+Smoothing using 5 point Tukey and generated Tukey spectra for each event
 
-Histograms were created for each event showing prevalence of peaks and notches
-
-Data files also created with the values of the peaks and notches per click in each event
+Acoustic recordings from the PASCAL, CCES, and Adrift surveys were initially pre-processed by NOAA analysts resulting in the identification of acoustic events of species including Risso's dolphins. From these analyst established events, broadband echolocation clicks were detected using customized detection workflows in PAMguard, previously developed for odontocete research by NOAA. Detections were organized into event-level databases, binaries, and acoustic study files for subsequent review and analysis. From these detections concatenated spectrograms and mean spectra were generated for each candidate detection in R in order to facilitate visual inspection and species confirmation.
 
 ## C. Spatial Patterns in Click Feature Distribution
 
 ### *1. Prevalence of Spectral Banding*
 
-Events that did not display spectral banding were removed
+Events that did not display spectral banding were removed early on in the process in alignment with Soldevilla et al 2017
 
 Events with less than 100 clicks exhibiting spectral banding were removed from further analysis
 
 ### *2. Spectral Feature Clustering and Geographic Variation*
 
-Explored 6 different "types of clustering":
+Interpolated all data to a shared frequency grid - what it was andd why
+
+Resrticted spectra to 19-50 kHz
+
+Min-max normalized spectra
+
+Filtered ICIs to between 0.01 and 0.4 seconds
+
+Sampled up to 200 random clicks per event
+
+Explored several different "types of clustering" and they weren't looking quite right:
 
 1.  Clustering of whole Tukey spectra
     -   K-means: k=2 provided best results, hard to see distinction between the centroids of the two clusters
 
     -   K-shape: k-2 provided best results, higher mean silhouette score than k-means, much better distinction between the two clusters
 
-    -   HDBSCAN: Still in progress
-2.  Clustering on selected peaks and notches - not sure if we will need to do this / want to
-    -   K-means:
+    -   HDBSCAN: one strong cluster with transitional clicks
 
-    -   K-shape:
+    -   The final workflow we went with was PCA, clustering by ICI and spectral shape, keeping 18 PC to keep 90% of variance, and then running UMAP and HDBSCAN on the UMPA results.
 
-    -   HDBSCAN:
+Successful workflow:
 
-After filtering from 0.01-0.4 ICI clicks out we retain 214,944 clicks (about 62.5% of the dataset) and remove 111,570 likely buzz/very short ICI clicks (about 32.4%) 
+Ran PCA on the spectra
 
-The joint PCA–ICI–UMAP–HDBSCAN workflow identified three major clusters and three smaller peripheral clusters. The major clusters differed primarily in ICI regime and secondarily in spectral shape: cluster 5 contained short-ICI clicks with smoother broadband spectra, cluster 4 contained longer-ICI clicks with stronger low-mid frequency emphasis and high-frequency rolloff, and cluster 6 contained longer-ICI clicks with more elevated upper-frequency structure. Smaller clusters 1–3 showed more localized spectral patterns but should be interpreted cautiously due to small sample sizes.
+Retained 18 PCs which is about 90% variance of the dataset
 
-Reducing ICI weight to 0.5× or 0.25× collapsed most points into a single dominant cluster, suggesting that ICI is necessary for resolving the joint spectral-temporal density structure. However, this also indicates that the main 1× clustering should be interpreted as timing-influenced rather than purely spectral.
+Computed scaled logICI
+
+Reducing ICI weight to 0.75x, 0.5× or 0.25× collapsed most points into a single dominant cluster, suggesting that ICI is necessary for resolving the joint spectral-temporal density structure. However, this also indicates that the main 1× clustering should be interpreted as timing-influenced rather than purely spectral.
+
+Combined PCs and scaled logICIs
+
+Ran UMAP
+
+Ran HDBSCAN clustering
 
 At low minPts values (10), HDBSCAN fragmented the embedding into many small local density clusters, suggesting substantial fine-scale local structure within the UMAP embedding. However, increasing density conservativeness (30–50) consistently recovered three dominant density regimes with similar proportions and organization. This suggests that the major spectral-temporal structure is relatively robust to moderate HDBSCAN parameter variation, while smaller local subclusters are less stable.
 
-18PC + 1× scaled logICI + UMAP + HDBSCAN(minPts = 50)
+18PC + 1× scaled 1x logICI + UMAP + HDBSCAN(minPts = 50)
+
+Generated mean spectra for the clusters as well as boxplots for the cluster ICI
+
+Mapped out the proportion of each cluster as pie slices in pie charts with one pie chart for each encounter
+
+Mapped the percentage of each cluster per detection by latitude and longitude throughout the california current ecosystem
 
 ### *3. Testing Geographic Structure in Echolocation Click Types Against Pre-existing Regional Variation*
+
+Used the R packaged pracma find peaks to calculate the peak and notch frequencies of the spectra of the clusters
+
+Used the same peak picking algorithm to determine the first four peaks and first three notches of every detection and then calculated the mean andstandard deviation across all of our events to compare against Soldevilla et al.'s regions
 
 # III. Results
 
 ## A. Prevalence of Spectral Banding
 
 ## B. Spectral Feature Clustering and Geographic Variation
+
+After filtering from 0.01-0.4 ICI clicks out we retain 214,944 clicks (about 62.5% of the dataset) and remove 111,570 likely buzz/very short ICI clicks (about 32.4%)
 
 ## C. Testing Geographic Structure in Echolocation Click Types Against Pre-existing Regional Variation
 

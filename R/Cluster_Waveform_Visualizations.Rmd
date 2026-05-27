@@ -1,0 +1,2112 @@
+---
+title: "Cluster_Waveform_Visualizations"
+author: "Sarah Moseley"
+date: "2026-05-24"
+output: html_document
+---
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(tibble)
+library(ggplot2)
+
+if (!requireNamespace("PamBinaries", quietly = TRUE)) {
+  install.packages("PamBinaries")
+}
+
+library(PamBinaries)
+
+set.seed(123)
+
+# ------------------------------------------------------------
+# Main analysis folder
+# ------------------------------------------------------------
+
+base_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1"
+
+audit_dir <- file.path(
+  base_dir,
+  "temporal_visualizations/bearing_source_audit"
+)
+
+waveform_dir <- file.path(
+  base_dir,
+  "plots/waveform_cluster_grids"
+)
+
+dir.create(waveform_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# Existing files created during the bearing workflow
+# ------------------------------------------------------------
+# These files come from the previous workflow where sampled HDBSCAN clicks
+# were joined to PAMGuard OfflineClicks metadata and matched to binary files.
+
+sampled_joined_file <- file.path(
+  audit_dir,
+  "sampled_hdbscan_clicks_joined_to_offline_clicks.csv"
+)
+
+manifest_file <- file.path(
+  audit_dir,
+  "PAMGuard_binary_manifest_for_bearing_export_CLEAN.csv"
+)
+
+# ------------------------------------------------------------
+# Cluster sets for this visualization
+# ------------------------------------------------------------
+
+# Individual 5x5 panels will be saved for all clusters,
+# including cluster 0/noise.
+individual_grid_clusters <- as.character(0:9)
+
+# Composite 3x3 figure will include only the nine assigned clusters.
+composite_grid_clusters <- as.character(1:9)
+
+# ------------------------------------------------------------
+# Cluster colors used throughout the clustering workflow
+# ------------------------------------------------------------
+
+cluster_colors <- c(
+  "0" = "grey80",
+  "1" = "#E41A1C",
+  "2" = "#FF7F00",
+  "3" = "#FFD92F",
+  "4" = "#4DAF4A",
+  "5" = "#00BFC4",
+  "6" = "#377EB8",
+  "7" = "#984EA3",
+  "8" = "#F781BF",
+  "9" = "#A65628"
+)
+
+```
+
+## Load and verify input files
+
+```{r load-inputs, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Confirm that the required input files exist
+# ------------------------------------------------------------
+
+required_files <- c(
+  sampled_joined_file,
+  manifest_file
+)
+
+missing_files <- required_files[!file.exists(required_files)]
+
+if (length(missing_files) > 0) {
+  stop(
+    "These required files are missing:\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+cat("All required input files found.\n\n")
+
+# ------------------------------------------------------------
+# Load sampled HDBSCAN clicks joined to OfflineClicks metadata
+# ------------------------------------------------------------
+
+sampled_clicks <- read_csv(
+  sampled_joined_file,
+  show_col_types = FALSE
+) %>%
+  mutate(
+    UID = as.character(UID),
+    BinaryFile = as.character(BinaryFile),
+    DriftID_clean = as.character(DriftID_clean),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+# ------------------------------------------------------------
+# Load clean PAMGuard binary manifest
+# ------------------------------------------------------------
+
+manifest_clean <- read_csv(
+  manifest_file,
+  show_col_types = FALSE
+) %>%
+  mutate(
+    DriftID_clean = as.character(DriftID_clean),
+    BinaryFile = as.character(BinaryFile),
+    full_path = as.character(full_path),
+    pgdx_full_path = as.character(pgdx_full_path)
+  )
+
+# ------------------------------------------------------------
+# Check required columns
+# ------------------------------------------------------------
+
+required_sampled_cols <- c(
+  "UID",
+  "EventID",
+  "DriftID_clean",
+  "BinaryFile",
+  "HDBSCAN_cluster"
+)
+
+required_manifest_cols <- c(
+  "DriftID_clean",
+  "BinaryFile",
+  "full_path",
+  "pgdx_full_path"
+)
+
+missing_sampled_cols <- setdiff(required_sampled_cols, names(sampled_clicks))
+missing_manifest_cols <- setdiff(required_manifest_cols, names(manifest_clean))
+
+if (length(missing_sampled_cols) > 0) {
+  stop(
+    "sampled_clicks is missing these required columns:\n",
+    paste(missing_sampled_cols, collapse = "\n")
+  )
+}
+
+if (length(missing_manifest_cols) > 0) {
+  stop(
+    "manifest_clean is missing these required columns:\n",
+    paste(missing_manifest_cols, collapse = "\n")
+  )
+}
+
+cat("All required columns found.\n\n")
+
+# ------------------------------------------------------------
+# Basic summaries
+# ------------------------------------------------------------
+
+cat("Sampled clicks loaded:", nrow(sampled_clicks), "\n")
+cat("Unique events:", n_distinct(sampled_clicks$EventID), "\n")
+cat("Unique drifts:", n_distinct(sampled_clicks$DriftID_clean), "\n")
+cat("Unique binary files represented in sampled clicks:", n_distinct(sampled_clicks$BinaryFile), "\n\n")
+
+cat("Clean binary manifest rows:", nrow(manifest_clean), "\n")
+cat("Unique manifest binary files:", n_distinct(manifest_clean$BinaryFile), "\n\n")
+
+cat("Clicks per HDBSCAN cluster:\n")
+
+sampled_clicks %>%
+  count(HDBSCAN_cluster, name = "n_clicks") %>%
+  arrange(as.numeric(HDBSCAN_cluster)) %>%
+  print(n = Inf)
+
+# ------------------------------------------------------------
+# Check that all intended clusters are present
+# ------------------------------------------------------------
+
+observed_clusters <- sort(unique(sampled_clicks$HDBSCAN_cluster))
+missing_expected_clusters <- setdiff(individual_grid_clusters, observed_clusters)
+
+if (length(missing_expected_clusters) > 0) {
+  warning(
+    "These expected clusters are missing from sampled_clicks: ",
+    paste(missing_expected_clusters, collapse = ", ")
+  )
+} else {
+  cat("\nAll expected clusters 0-9 are present.\n")
+}
+
+```
+
+## Smoke test one PAMGuard binary for waveform data
+
+```{r smoke-test-one-binary-waveforms, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Pick one binary file that actually contains sampled clicks
+# ------------------------------------------------------------
+
+binary_click_counts <- sampled_clicks %>%
+  filter(!is.na(BinaryFile)) %>%
+  count(DriftID_clean, BinaryFile, name = "n_sampled_clicks") %>%
+  left_join(
+    manifest_clean,
+    by = c("DriftID_clean", "BinaryFile")
+  ) %>%
+  arrange(desc(n_sampled_clicks))
+
+cat("Binary files available for waveform smoke test:\n")
+print(binary_click_counts %>% head(10))
+
+# Use the binary file with the most sampled clicks
+test_binary <- binary_click_counts %>%
+  filter(!is.na(full_path)) %>%
+  slice(1)
+
+test_pgdf <- test_binary$full_path[1]
+
+cat("\nTesting PAMGuard binary file:\n")
+cat(test_pgdf, "\n\n")
+
+cat("This file contains", test_binary$n_sampled_clicks[1], "sampled clicks from the current analysis.\n\n")
+
+# ------------------------------------------------------------
+# Load the PAMGuard binary WITH large objects included
+# ------------------------------------------------------------
+# Important:
+# skipLarge = FALSE is the key change from the bearing workflow.
+# This may take longer than the angle extraction workflow.
+
+pg_test <- PamBinaries::loadPamguardBinaryFile(
+  fileName = test_pgdf,
+  skipLarge = FALSE,
+  convertDate = TRUE
+)
+
+cat("Binary loaded successfully.\n\n")
+
+# ------------------------------------------------------------
+# Basic object inspection
+# ------------------------------------------------------------
+
+cat("Class of loaded object:\n")
+print(class(pg_test))
+
+cat("\nTop-level names in loaded object:\n")
+print(names(pg_test))
+
+cat("\nStructure preview of loaded object:\n")
+str(pg_test, max.level = 2)
+
+# ------------------------------------------------------------
+# Try converting to a data frame, as in the bearing workflow
+# ------------------------------------------------------------
+
+pg_test_df <- as.data.frame(pg_test) %>%
+  as_tibble()
+
+cat("\nRows in converted data frame:", nrow(pg_test_df), "\n")
+cat("Columns in converted data frame:", ncol(pg_test_df), "\n\n")
+
+cat("Column names:\n")
+print(names(pg_test_df))
+
+# ------------------------------------------------------------
+# Identify columns that may contain waveform/sample data
+# ------------------------------------------------------------
+
+candidate_waveform_cols <- names(pg_test_df)[
+  str_detect(
+    names(pg_test_df),
+    regex("wave|waveform|raw|sample|samples|signal|data", ignore_case = TRUE)
+  )
+]
+
+cat("\nCandidate waveform-like columns based on names:\n")
+print(candidate_waveform_cols)
+
+# ------------------------------------------------------------
+# Identify list columns, because waveform data is often stored as a list column
+# ------------------------------------------------------------
+
+list_cols <- names(pg_test_df)[
+  map_lgl(pg_test_df, is.list)
+]
+
+cat("\nList columns in converted data frame:\n")
+print(list_cols)
+
+# ------------------------------------------------------------
+# Summarize candidate/list columns so we can see what they contain
+# ------------------------------------------------------------
+
+cols_to_inspect <- unique(c(candidate_waveform_cols, list_cols))
+
+if (length(cols_to_inspect) > 0) {
+  
+  cat("\nPreview of candidate waveform/list columns:\n")
+  
+  for (col in cols_to_inspect) {
+    
+    cat("\n----------------------------\n")
+    cat("Column:", col, "\n")
+    cat("Class:\n")
+    print(class(pg_test_df[[col]]))
+    
+    first_non_null_index <- which(!map_lgl(pg_test_df[[col]], is.null))[1]
+    
+    if (!is.na(first_non_null_index)) {
+      cat("First non-null row index:", first_non_null_index, "\n")
+      cat("Structure of first non-null value:\n")
+      str(pg_test_df[[col]][[first_non_null_index]], max.level = 2)
+    } else {
+      cat("No non-null values found in this column.\n")
+    }
+  }
+  
+} else {
+  
+  cat("\nNo obvious waveform/list columns found in the converted data frame.\n")
+  cat("We may need to inspect the raw pg_test object directly.\n")
+}
+
+# ------------------------------------------------------------
+# Inspect a row corresponding to one sampled click in this binary
+# ------------------------------------------------------------
+
+sampled_uids_in_test_binary <- sampled_clicks %>%
+  filter(
+    DriftID_clean == test_binary$DriftID_clean[1],
+    BinaryFile == test_binary$BinaryFile[1]
+  ) %>%
+  distinct(UID, HDBSCAN_cluster, EventID) %>%
+  arrange(HDBSCAN_cluster, UID)
+
+cat("\nSampled UIDs from this binary:\n")
+print(sampled_uids_in_test_binary %>% head(10))
+
+if ("UID" %in% names(pg_test_df)) {
+  
+  pg_test_df <- pg_test_df %>%
+    mutate(UID = as.character(UID))
+  
+  matched_rows <- pg_test_df %>%
+    semi_join(sampled_uids_in_test_binary, by = "UID")
+  
+  cat("\nRows in this binary matching sampled clicks:", nrow(matched_rows), "\n")
+  
+  if (nrow(matched_rows) > 0) {
+    cat("\nPreview of matched rows, excluding any very large columns:\n")
+    
+    matched_rows %>%
+      select(-any_of(list_cols)) %>%
+      head(10) %>%
+      print(width = Inf)
+  }
+  
+} else {
+  cat("\nNo UID column found in pg_test_df. We need to inspect the object structure more carefully.\n")
+}
+
+```
+
+## Inspect raw PAMGuard click objects for waveform fields
+
+```{r inspect-raw-click-waveform-fields, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Check arguments accepted by loadPamguardBinaryFile()
+# ------------------------------------------------------------
+
+cat("Arguments for PamBinaries::loadPamguardBinaryFile:\n")
+print(args(PamBinaries::loadPamguardBinaryFile))
+
+loader_arg_names <- names(formals(PamBinaries::loadPamguardBinaryFile))
+
+cat("\nFormal argument names:\n")
+print(loader_arg_names)
+
+# ------------------------------------------------------------
+# Inspect one raw click object from pg_test$data
+# ------------------------------------------------------------
+
+cat("\nNumber of raw click objects in pg_test$data:", length(pg_test$data), "\n\n")
+
+cat("Names of first few raw click objects:\n")
+print(head(names(pg_test$data), 10))
+
+first_click <- pg_test$data[[1]]
+
+cat("\nClass of first raw click object:\n")
+print(class(first_click))
+
+cat("\nNames inside first raw click object:\n")
+print(names(first_click))
+
+cat("\nStructure of first raw click object:\n")
+str(first_click, max.level = 3)
+
+# ------------------------------------------------------------
+# Inspect one raw click that matches our sampled-click UIDs
+# ------------------------------------------------------------
+
+matched_uid <- sampled_uids_in_test_binary$UID[1]
+
+cat("\nTrying to inspect sampled UID:", matched_uid, "\n")
+
+if (matched_uid %in% names(pg_test$data)) {
+  
+  matched_click_raw <- pg_test$data[[matched_uid]]
+  
+  cat("\nMatched UID found directly in pg_test$data names.\n")
+  cat("\nNames inside matched raw click object:\n")
+  print(names(matched_click_raw))
+  
+  cat("\nStructure of matched raw click object:\n")
+  str(matched_click_raw, max.level = 3)
+  
+} else {
+  
+  cat("\nMatched UID was not found directly in pg_test$data names.\n")
+  cat("Trying to locate it by UID field inside raw objects...\n")
+  
+  raw_uids <- map_chr(
+    pg_test$data,
+    ~ as.character(.x$UID %||% NA_character_)
+  )
+  
+  matched_index <- which(raw_uids == matched_uid)[1]
+  
+  if (!is.na(matched_index)) {
+    matched_click_raw <- pg_test$data[[matched_index]]
+    
+    cat("\nMatched UID found at raw object index:", matched_index, "\n")
+    cat("\nNames inside matched raw click object:\n")
+    print(names(matched_click_raw))
+    
+    cat("\nStructure of matched raw click object:\n")
+    str(matched_click_raw, max.level = 3)
+    
+  } else {
+    cat("\nCould not locate matched UID in raw objects.\n")
+  }
+}
+
+# ------------------------------------------------------------
+# Search raw click fields for likely waveform/sample names
+# ------------------------------------------------------------
+
+raw_field_names <- names(first_click)
+
+possible_waveform_fields <- raw_field_names[
+  str_detect(
+    raw_field_names,
+    regex("wave|waveform|raw|sample|samples|signal|data", ignore_case = TRUE)
+  )
+]
+
+cat("\nPossible waveform-related fields inside raw click object:\n")
+print(possible_waveform_fields)
+
+# ------------------------------------------------------------
+# If waveform-specific loader arguments exist, try loading with them
+# ------------------------------------------------------------
+
+if ("getWave" %in% loader_arg_names) {
+  
+  cat("\nThe loader supports getWave. Trying getWave = TRUE...\n")
+  
+  wave_args <- list(
+    fileName = test_pgdf,
+    skipLarge = FALSE,
+    convertDate = TRUE,
+    getWave = TRUE
+  )
+  
+  if ("onlyWave" %in% loader_arg_names) {
+    wave_args$onlyWave <- FALSE
+  }
+  
+  pg_test_wave <- do.call(
+    PamBinaries::loadPamguardBinaryFile,
+    wave_args
+  )
+  
+  cat("\nWave-enabled binary loaded successfully.\n")
+  
+  first_click_wave <- pg_test_wave$data[[1]]
+  
+  cat("\nNames inside first wave-enabled raw click object:\n")
+  print(names(first_click_wave))
+  
+  cat("\nStructure of first wave-enabled raw click object:\n")
+  str(first_click_wave, max.level = 3)
+  
+  wave_df <- as.data.frame(pg_test_wave) %>%
+    as_tibble()
+  
+  cat("\nColumns after wave-enabled load:\n")
+  print(names(wave_df))
+  
+  wave_list_cols <- names(wave_df)[map_lgl(wave_df, is.list)]
+  
+  cat("\nList columns after wave-enabled load:\n")
+  print(wave_list_cols)
+  
+} else {
+  
+  cat("\nThe loader does not appear to expose getWave as a formal argument.\n")
+  cat("We will need to inspect the raw object fields or PamBinaries documentation/source behavior.\n")
+}
+
+```
+
+## Extract and plot one sampled waveform using channel 1
+
+```{r extract-and-plot-one-waveform-channel-1, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Channel choice
+# ------------------------------------------------------------
+# We will use the first waveform column for every click.
+# In the PAMGuard raw click object, wave is samples x channels.
+
+selected_wave_channel <- 1
+
+# ------------------------------------------------------------
+# Helper: extract one waveform from a raw PAMGuard click object
+# ------------------------------------------------------------
+
+extract_one_waveform <- function(raw_click, channel = selected_wave_channel, normalize = TRUE) {
+  
+  wave_matrix <- raw_click$wave
+  
+  if (is.null(wave_matrix)) {
+    stop("This raw click does not contain a wave field.")
+  }
+  
+  if (!is.matrix(wave_matrix)) {
+    wave_matrix <- as.matrix(wave_matrix)
+  }
+  
+  # PAMGuard wave is samples x channels
+  n_samples <- nrow(wave_matrix)
+  n_channels <- ncol(wave_matrix)
+  
+  if (channel > n_channels) {
+    stop(
+      "Requested channel ",
+      channel,
+      ", but this click only has ",
+      n_channels,
+      " channel(s)."
+    )
+  }
+  
+  waveform <- wave_matrix[, channel]
+  
+  # Normalize each click to compare waveform shape rather than amplitude
+  if (normalize) {
+    max_abs_amp <- max(abs(waveform), na.rm = TRUE)
+    
+    if (is.finite(max_abs_amp) && max_abs_amp > 0) {
+      waveform <- waveform / max_abs_amp
+    }
+  }
+  
+  tibble(
+    sample_index = seq_len(n_samples),
+    amplitude = as.numeric(waveform),
+    wave_channel_used = channel,
+    n_channels = n_channels,
+    n_samples = n_samples,
+    UID = as.character(raw_click$UID),
+    sampleDuration = as.integer(raw_click$sampleDuration),
+    maxAmplitude = as.numeric(raw_click$maxAmplitude)
+  )
+}
+
+# ------------------------------------------------------------
+# Use the matched sampled click we inspected above
+# ------------------------------------------------------------
+
+one_waveform <- extract_one_waveform(
+  raw_click = matched_click_raw,
+  channel = selected_wave_channel,
+  normalize = TRUE
+)
+
+cat("Extracted waveform summary:\n")
+
+one_waveform %>%
+  summarise(
+    UID = first(UID),
+    n_samples = first(n_samples),
+    n_channels = first(n_channels),
+    wave_channel_used = first(wave_channel_used),
+    min_amplitude = min(amplitude, na.rm = TRUE),
+    max_amplitude = max(amplitude, na.rm = TRUE),
+    sampleDuration = first(sampleDuration),
+    maxAmplitude = first(maxAmplitude)
+  ) %>%
+  print(width = Inf)
+
+# ------------------------------------------------------------
+# Plot one waveform
+# ------------------------------------------------------------
+
+p_one_waveform <- ggplot(
+  one_waveform,
+  aes(x = sample_index, y = amplitude)
+) +
+  geom_line(linewidth = 0.35) +
+  labs(
+    title = paste0("Example Waveform: UID ", unique(one_waveform$UID)),
+    subtitle = paste0(
+      "Waveform channel = ",
+      unique(one_waveform$wave_channel_used),
+      "; normalized amplitude"
+    ),
+    x = "Sample index",
+    y = "Normalized amplitude"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank()
+  )
+
+print(p_one_waveform)
+
+ggsave(
+  filename = file.path(
+    waveform_dir,
+    paste0(
+      "example_waveform_UID_",
+      unique(one_waveform$UID),
+      "_channel_",
+      selected_wave_channel,
+      ".png"
+    )
+  ),
+  plot = p_one_waveform,
+  width = 7,
+  height = 4,
+  dpi = 300
+)
+
+```
+
+## Randomly sample 25 clicks per cluster
+
+```{r sample-clicks-per-cluster, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Sampling settings
+# ------------------------------------------------------------
+
+waveform_sample_n <- 25
+
+set.seed(123)
+
+# ------------------------------------------------------------
+# Check that each cluster has at least 25 clicks available
+# ------------------------------------------------------------
+
+cluster_availability <- sampled_clicks %>%
+  filter(HDBSCAN_cluster %in% individual_grid_clusters) %>%
+  count(HDBSCAN_cluster, name = "n_available_clicks") %>%
+  arrange(as.numeric(HDBSCAN_cluster))
+
+cat("Available clicks per cluster:\n")
+print(cluster_availability, n = Inf)
+
+clusters_with_too_few_clicks <- cluster_availability %>%
+  filter(n_available_clicks < waveform_sample_n)
+
+if (nrow(clusters_with_too_few_clicks) > 0) {
+  stop(
+    "At least one cluster has fewer than ",
+    waveform_sample_n,
+    " clicks. Check clusters:\n",
+    paste(clusters_with_too_few_clicks$HDBSCAN_cluster, collapse = ", ")
+  )
+}
+
+cat("\nAll clusters have at least", waveform_sample_n, "clicks available.\n\n")
+
+# ------------------------------------------------------------
+# Randomly sample 25 clicks per cluster
+# ------------------------------------------------------------
+
+waveform_sample_keys <- sampled_clicks %>%
+  filter(
+    HDBSCAN_cluster %in% individual_grid_clusters,
+    !is.na(UID),
+    !is.na(BinaryFile),
+    !is.na(DriftID_clean)
+  ) %>%
+  group_by(HDBSCAN_cluster) %>%
+  slice_sample(n = waveform_sample_n) %>%
+  ungroup() %>%
+  mutate(
+    HDBSCAN_cluster = factor(
+      HDBSCAN_cluster,
+      levels = individual_grid_clusters
+    )
+  ) %>%
+  arrange(HDBSCAN_cluster, DriftID_clean, BinaryFile, UID)
+
+# ------------------------------------------------------------
+# Attach PAMGuard binary paths from clean manifest
+# ------------------------------------------------------------
+
+waveform_sample_manifest <- waveform_sample_keys %>%
+  left_join(
+    manifest_clean %>%
+      select(
+        DriftID_clean,
+        BinaryFile,
+        full_path,
+        pgdx_full_path
+      ),
+    by = c("DriftID_clean", "BinaryFile")
+  )
+
+# ------------------------------------------------------------
+# Verify binary paths were found
+# ------------------------------------------------------------
+
+missing_binary_paths <- waveform_sample_manifest %>%
+  filter(is.na(full_path) | !file.exists(full_path))
+
+if (nrow(missing_binary_paths) > 0) {
+  cat("Rows with missing binary paths:\n")
+  print(
+    missing_binary_paths %>%
+      select(HDBSCAN_cluster, EventID, DriftID_clean, BinaryFile, UID, full_path),
+    n = Inf
+  )
+  
+  stop("Some sampled clicks do not have valid PAMGuard binary paths.")
+}
+
+cat("All sampled clicks have valid PAMGuard binary paths.\n\n")
+
+# ------------------------------------------------------------
+# Summaries
+# ------------------------------------------------------------
+
+cat("Sampled clicks per cluster:\n")
+waveform_sample_manifest %>%
+  count(HDBSCAN_cluster, name = "n_sampled_clicks") %>%
+  arrange(as.numeric(as.character(HDBSCAN_cluster))) %>%
+  print(n = Inf)
+
+cat("\nNumber of unique binary files needed:\n")
+waveform_sample_manifest %>%
+  summarise(
+    n_sampled_clicks = n(),
+    n_unique_clusters = n_distinct(HDBSCAN_cluster),
+    n_unique_events = n_distinct(EventID),
+    n_unique_drifts = n_distinct(DriftID_clean),
+    n_unique_binary_files = n_distinct(paste(DriftID_clean, BinaryFile))
+  ) %>%
+  print(width = Inf)
+
+cat("\nSampled clicks by cluster and binary file:\n")
+waveform_sample_manifest %>%
+  count(HDBSCAN_cluster, DriftID_clean, BinaryFile, name = "n_clicks") %>%
+  arrange(as.numeric(as.character(HDBSCAN_cluster)), DriftID_clean, BinaryFile) %>%
+  print(n = Inf)
+
+# ------------------------------------------------------------
+# Save sampled click table for reproducibility
+# ------------------------------------------------------------
+
+waveform_sample_file <- file.path(
+  waveform_dir,
+  paste0("waveform_sample_25_clicks_per_cluster_channel_", selected_wave_channel, ".csv")
+)
+
+write_csv(
+  waveform_sample_manifest,
+  waveform_sample_file
+)
+
+cat("\nSaved waveform sample table to:\n")
+cat(waveform_sample_file, "\n")
+
+```
+
+## Extract waveforms for sampled clicks
+
+```{r extract-sampled-waveforms, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Helper: safely read waveforms from one PAMGuard binary file
+# ------------------------------------------------------------
+
+read_sampled_waveforms_from_binary <- function(binary_sample_df) {
+  
+  this_drift <- unique(binary_sample_df$DriftID_clean)
+  this_binary <- unique(binary_sample_df$BinaryFile)
+  this_path <- unique(binary_sample_df$full_path)
+  
+  if (length(this_drift) != 1 || length(this_binary) != 1 || length(this_path) != 1) {
+    stop("Each binary_sample_df must correspond to exactly one DriftID_clean + BinaryFile + full_path.")
+  }
+  
+  needed_uids_chr <- unique(as.character(binary_sample_df$UID))
+  needed_uids_num <- suppressWarnings(as.numeric(needed_uids_chr))
+  
+  cat("Reading:", this_drift, "|", this_binary, "|", length(needed_uids_chr), "sampled UID(s)\n")
+  
+  out <- tryCatch({
+    
+    pg <- PamBinaries::loadPamguardBinaryFile(
+      fileName = this_path,
+      skipLarge = FALSE,
+      skipData = FALSE,
+      keepUIDs = needed_uids_num,
+      convertDate = TRUE
+    )
+    
+    available_uids <- names(pg$data)
+    
+    map_dfr(seq_len(nrow(binary_sample_df)), function(i) {
+      
+      click_meta <- binary_sample_df[i, ]
+      uid_chr <- as.character(click_meta$UID)
+      
+      if (!uid_chr %in% available_uids) {
+        warning(
+          "UID not found in loaded binary: ",
+          uid_chr,
+          " | ",
+          this_binary
+        )
+        
+        return(tibble())
+      }
+      
+      raw_click <- pg$data[[uid_chr]]
+      
+      one_wave <- extract_one_waveform(
+        raw_click = raw_click,
+        channel = selected_wave_channel,
+        normalize = TRUE
+      )
+      
+      one_wave %>%
+        mutate(
+          HDBSCAN_cluster = as.character(click_meta$HDBSCAN_cluster),
+          EventID = as.character(click_meta$EventID),
+          DriftID_clean = as.character(click_meta$DriftID_clean),
+          BinaryFile = as.character(click_meta$BinaryFile),
+          waveform_panel_id = paste0(
+            "Cluster ",
+            as.character(click_meta$HDBSCAN_cluster),
+            " | UID ",
+            uid_chr
+          )
+        )
+    })
+    
+  }, error = function(e) {
+    
+    warning(
+      "Failed to read binary: ",
+      this_path,
+      "\nError: ",
+      e$message
+    )
+    
+    tibble()
+  })
+  
+  return(out)
+}
+
+# ------------------------------------------------------------
+# Split sampled clicks by binary file
+# ------------------------------------------------------------
+
+waveform_binary_groups <- waveform_sample_manifest %>%
+  mutate(
+    UID = as.character(UID),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  ) %>%
+  group_by(DriftID_clean, BinaryFile, full_path) %>%
+  group_split()
+
+cat("Number of binary files to read:", length(waveform_binary_groups), "\n\n")
+
+# ------------------------------------------------------------
+# Extract all sampled waveforms
+# ------------------------------------------------------------
+
+sampled_waveforms_long <- map_dfr(
+  waveform_binary_groups,
+  read_sampled_waveforms_from_binary
+)
+
+cat("\nFinished waveform extraction.\n\n")
+
+# ------------------------------------------------------------
+# Verify extraction success
+# ------------------------------------------------------------
+
+waveform_extraction_summary <- sampled_waveforms_long %>%
+  distinct(
+    HDBSCAN_cluster,
+    EventID,
+    DriftID_clean,
+    BinaryFile,
+    UID,
+    wave_channel_used,
+    n_channels,
+    n_samples
+  ) %>%
+  summarise(
+    n_waveforms_extracted = n(),
+    n_unique_clusters = n_distinct(HDBSCAN_cluster),
+    n_unique_events = n_distinct(EventID),
+    n_unique_drifts = n_distinct(DriftID_clean),
+    min_n_samples = min(n_samples, na.rm = TRUE),
+    median_n_samples = median(n_samples, na.rm = TRUE),
+    max_n_samples = max(n_samples, na.rm = TRUE),
+    wave_channel_used = paste(sort(unique(wave_channel_used)), collapse = ", ")
+  )
+
+cat("Waveform extraction summary:\n")
+print(waveform_extraction_summary, width = Inf)
+
+cat("\nExtracted waveforms per cluster:\n")
+
+sampled_waveforms_long %>%
+  distinct(HDBSCAN_cluster, UID) %>%
+  count(HDBSCAN_cluster, name = "n_waveforms_extracted") %>%
+  arrange(as.numeric(HDBSCAN_cluster)) %>%
+  print(n = Inf)
+
+# ------------------------------------------------------------
+# Check for missing sampled clicks
+# ------------------------------------------------------------
+
+expected_waveform_keys <- waveform_sample_manifest %>%
+  transmute(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    DriftID_clean = as.character(DriftID_clean),
+    BinaryFile = as.character(BinaryFile),
+    UID = as.character(UID)
+  ) %>%
+  distinct()
+
+extracted_waveform_keys <- sampled_waveforms_long %>%
+  transmute(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    DriftID_clean = as.character(DriftID_clean),
+    BinaryFile = as.character(BinaryFile),
+    UID = as.character(UID)
+  ) %>%
+  distinct()
+
+missing_waveform_keys <- expected_waveform_keys %>%
+  anti_join(
+    extracted_waveform_keys,
+    by = c("HDBSCAN_cluster", "DriftID_clean", "BinaryFile", "UID")
+  )
+
+if (nrow(missing_waveform_keys) > 0) {
+  cat("\nWARNING: Some sampled clicks were not extracted:\n")
+  print(missing_waveform_keys, n = Inf)
+} else {
+  cat("\nAll sampled clicks were successfully extracted.\n")
+}
+
+# ------------------------------------------------------------
+# Save extracted waveform data
+# ------------------------------------------------------------
+
+waveform_long_file <- file.path(
+  waveform_dir,
+  paste0("sampled_waveforms_long_25_per_cluster_channel_", selected_wave_channel, ".rds")
+)
+
+saveRDS(
+  sampled_waveforms_long,
+  waveform_long_file
+)
+
+cat("\nSaved extracted waveform data to:\n")
+cat(waveform_long_file, "\n")
+
+```
+
+## Save individual 5x5 waveform grids for each cluster
+
+```{r save-individual-cluster-waveform-grids, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# If needed, reload extracted waveform data
+# ------------------------------------------------------------
+# This lets the chunk run even if you restart R after extraction.
+
+if (!exists("sampled_waveforms_long")) {
+  
+  waveform_long_file <- file.path(
+    waveform_dir,
+    paste0("sampled_waveforms_long_25_per_cluster_channel_", selected_wave_channel, ".rds")
+  )
+  
+  sampled_waveforms_long <- readRDS(waveform_long_file)
+}
+
+# ------------------------------------------------------------
+# Build stable 1-25 panel IDs within each cluster
+# ------------------------------------------------------------
+
+waveform_panel_lookup <- sampled_waveforms_long %>%
+  distinct(
+    HDBSCAN_cluster,
+    EventID,
+    DriftID_clean,
+    BinaryFile,
+    UID
+  ) %>%
+  arrange(
+    as.numeric(HDBSCAN_cluster),
+    EventID,
+    DriftID_clean,
+    BinaryFile,
+    UID
+  ) %>%
+  group_by(HDBSCAN_cluster) %>%
+  mutate(
+    waveform_number = row_number(),
+    waveform_facet_label = paste0("Click ", waveform_number, "\nUID ", UID)
+  ) %>%
+  ungroup()
+
+sampled_waveforms_for_plot <- sampled_waveforms_long %>%
+  left_join(
+    waveform_panel_lookup,
+    by = c(
+      "HDBSCAN_cluster",
+      "EventID",
+      "DriftID_clean",
+      "BinaryFile",
+      "UID"
+    )
+  ) %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    waveform_facet_label = factor(
+      waveform_facet_label,
+      levels = waveform_panel_lookup$waveform_facet_label
+    )
+  )
+
+# ------------------------------------------------------------
+# Helper: make one 5x5 waveform grid for a cluster
+# ------------------------------------------------------------
+
+make_cluster_waveform_grid <- function(cluster_id) {
+  
+  cluster_id <- as.character(cluster_id)
+  
+  cluster_plot_data <- sampled_waveforms_for_plot %>%
+    filter(HDBSCAN_cluster == cluster_id)
+  
+  n_waveforms <- cluster_plot_data %>%
+    distinct(UID, EventID, DriftID_clean, BinaryFile) %>%
+    nrow()
+  
+  if (n_waveforms != 25) {
+    warning(
+      "Cluster ",
+      cluster_id,
+      " has ",
+      n_waveforms,
+      " waveforms instead of 25."
+    )
+  }
+  
+  cluster_line_color <- cluster_colors[[cluster_id]]
+  
+  ggplot(
+    cluster_plot_data,
+    aes(x = sample_index, y = amplitude)
+  ) +
+    geom_hline(
+      yintercept = 0,
+      linewidth = 0.2,
+      color = "grey70"
+    ) +
+    geom_line(
+      linewidth = 0.25,
+      color = cluster_line_color
+    ) +
+    facet_wrap(
+      ~ waveform_facet_label,
+      ncol = 5,
+      nrow = 5
+    ) +
+    coord_cartesian(
+      ylim = c(-1, 1)
+    ) +
+    labs(
+      title = paste0("Cluster ", cluster_id, " Waveforms"),
+      subtitle = paste0(
+        "25 randomly sampled clicks; channel ",
+        selected_wave_channel,
+        "; normalized amplitude"
+      ),
+      x = "Sample index",
+      y = "Normalized amplitude"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      strip.text = element_text(size = 6),
+      plot.title = element_text(face = "bold", size = 15),
+      plot.subtitle = element_text(size = 10),
+      axis.text = element_text(size = 7),
+      axis.title = element_text(size = 10),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(linewidth = 0.2),
+      panel.spacing = unit(0.35, "lines")
+    )
+}
+
+# ------------------------------------------------------------
+# Save one grid per cluster, including cluster 0/noise
+# ------------------------------------------------------------
+
+individual_grid_files <- map_chr(individual_grid_clusters, function(cluster_id) {
+  
+  p_cluster <- make_cluster_waveform_grid(cluster_id)
+  
+  out_file <- file.path(
+    waveform_dir,
+    paste0(
+      "cluster_",
+      cluster_id,
+      "_waveforms_5x5_25_clicks_channel_",
+      selected_wave_channel,
+      ".png"
+    )
+  )
+  
+  ggsave(
+    filename = out_file,
+    plot = p_cluster,
+    width = 10,
+    height = 9,
+    dpi = 300
+  )
+  
+  cat("Saved:", out_file, "\n")
+  
+  out_file
+})
+
+# ------------------------------------------------------------
+# Print one example in the RMarkdown output
+# ------------------------------------------------------------
+
+print(make_cluster_waveform_grid("0"))
+
+cat("\nIndividual 5x5 waveform grids saved for clusters:\n")
+print(individual_grid_clusters)
+
+```
+
+## Save 3x3 composite waveform grid for clusters 1-9
+
+```{r save-composite-cluster-waveform-grid, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Load patchwork for combining ggplots
+# ------------------------------------------------------------
+
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  install.packages("patchwork")
+}
+
+library(patchwork)
+
+# ------------------------------------------------------------
+# Helper: make compact 5x5 cluster panel for composite figure
+# ------------------------------------------------------------
+
+make_compact_cluster_waveform_grid <- function(cluster_id) {
+  
+  cluster_id <- as.character(cluster_id)
+  
+  cluster_plot_data <- sampled_waveforms_for_plot %>%
+    filter(HDBSCAN_cluster == cluster_id) %>%
+    mutate(
+      waveform_number = factor(
+        waveform_number,
+        levels = 1:25
+      )
+    )
+  
+  n_waveforms <- cluster_plot_data %>%
+    distinct(UID, EventID, DriftID_clean, BinaryFile) %>%
+    nrow()
+  
+  if (n_waveforms != 25) {
+    warning(
+      "Cluster ",
+      cluster_id,
+      " has ",
+      n_waveforms,
+      " waveforms instead of 25."
+    )
+  }
+  
+  cluster_line_color <- cluster_colors[[cluster_id]]
+  
+  ggplot(
+    cluster_plot_data,
+    aes(x = sample_index, y = amplitude)
+  ) +
+    geom_hline(
+      yintercept = 0,
+      linewidth = 0.15,
+      color = "grey75"
+    ) +
+    geom_line(
+      linewidth = 0.18,
+      color = cluster_line_color
+    ) +
+    facet_wrap(
+      ~ waveform_number,
+      ncol = 5,
+      nrow = 5
+    ) +
+    coord_cartesian(
+      ylim = c(-1, 1)
+    ) +
+    labs(
+      title = paste0("Cluster ", cluster_id),
+      x = NULL,
+      y = NULL
+    ) +
+    theme_bw(base_size = 8) +
+    theme(
+      plot.title = element_text(
+        face = "bold",
+        size = 11,
+        hjust = 0.5
+      ),
+      strip.text = element_blank(),
+      strip.background = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(linewidth = 0.12),
+      panel.spacing = unit(0.12, "lines"),
+      plot.margin = margin(4, 4, 4, 4)
+    )
+}
+
+# ------------------------------------------------------------
+# Build one compact panel for each assigned cluster
+# ------------------------------------------------------------
+
+composite_cluster_plots <- map(
+  composite_grid_clusters,
+  make_compact_cluster_waveform_grid
+)
+
+# ------------------------------------------------------------
+# Combine into 3x3 composite
+# ------------------------------------------------------------
+
+p_composite_waveforms <- wrap_plots(
+  composite_cluster_plots,
+  ncol = 3,
+  nrow = 3
+) +
+  plot_annotation(
+    title = "Sampled Waveforms by HDBSCAN Cluster",
+    subtitle = paste0(
+      "Clusters 1-9 only; 25 randomly sampled clicks per cluster; channel ",
+      selected_wave_channel,
+      "; normalized amplitude"
+    ),
+    theme = theme(
+      plot.title = element_text(
+        face = "bold",
+        size = 18,
+        hjust = 0.5
+      ),
+      plot.subtitle = element_text(
+        size = 12,
+        hjust = 0.5
+      )
+    )
+  )
+
+print(p_composite_waveforms)
+
+# ------------------------------------------------------------
+# Save composite figure
+# ------------------------------------------------------------
+
+composite_file <- file.path(
+  waveform_dir,
+  paste0(
+    "clusters_1_to_9_waveforms_composite_3x3_each_5x5_channel_",
+    selected_wave_channel,
+    ".png"
+  )
+)
+
+ggsave(
+  filename = composite_file,
+  plot = p_composite_waveforms,
+  width = 18,
+  height = 16,
+  dpi = 300
+)
+
+cat("Saved composite waveform figure to:\n")
+cat(composite_file, "\n")
+
+```
+
+## ============================================================
+## NEW OUTPUT SET:
+## 25 new random waveforms per HDBSCAN cluster,
+## excluding the previous sampled waveform UIDs
+## ============================================================
+
+```{r new-25-per-cluster-waveform-output-excluding-prior, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(tibble)
+library(ggplot2)
+
+if (!requireNamespace("PamBinaries", quietly = TRUE)) {
+  install.packages("PamBinaries")
+}
+library(PamBinaries)
+
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  install.packages("patchwork")
+}
+library(patchwork)
+
+set.seed(456)
+
+# ------------------------------------------------------------
+# Settings
+# ------------------------------------------------------------
+
+base_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1"
+
+audit_dir <- file.path(
+  base_dir,
+  "temporal_visualizations/bearing_source_audit"
+)
+
+old_waveform_dir <- file.path(
+  base_dir,
+  "plots/waveform_cluster_grids"
+)
+
+new_waveform_dir <- file.path(
+  base_dir,
+  "plots/waveform_cluster_grids_NEW_25_per_cluster_excluding_prior"
+)
+
+dir.create(new_waveform_dir, recursive = TRUE, showWarnings = FALSE)
+
+sampled_joined_file <- file.path(
+  audit_dir,
+  "sampled_hdbscan_clicks_joined_to_offline_clicks.csv"
+)
+
+manifest_file <- file.path(
+  audit_dir,
+  "PAMGuard_binary_manifest_for_bearing_export_CLEAN.csv"
+)
+
+selected_wave_channel <- 1
+waveform_sample_n <- 25
+
+individual_grid_clusters <- as.character(0:9)
+composite_grid_clusters <- as.character(1:9)
+
+cluster_colors <- c(
+  "0" = "grey80",
+  "1" = "#E41A1C",
+  "2" = "#FF7F00",
+  "3" = "#FFD92F",
+  "4" = "#4DAF4A",
+  "5" = "#00BFC4",
+  "6" = "#377EB8",
+  "7" = "#984EA3",
+  "8" = "#F781BF",
+  "9" = "#A65628"
+)
+
+# ------------------------------------------------------------
+# Load input files
+# ------------------------------------------------------------
+
+required_files <- c(sampled_joined_file, manifest_file)
+
+missing_files <- required_files[!file.exists(required_files)]
+
+if (length(missing_files) > 0) {
+  stop(
+    "These required files are missing:\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+sampled_clicks <- read_csv(sampled_joined_file, show_col_types = FALSE) %>%
+  mutate(
+    UID = as.character(UID),
+    EventID = as.character(EventID),
+    BinaryFile = as.character(BinaryFile),
+    DriftID_clean = as.character(DriftID_clean),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  )
+
+manifest_clean <- read_csv(manifest_file, show_col_types = FALSE) %>%
+  mutate(
+    DriftID_clean = as.character(DriftID_clean),
+    BinaryFile = as.character(BinaryFile),
+    full_path = as.character(full_path),
+    pgdx_full_path = as.character(pgdx_full_path)
+  )
+
+# ------------------------------------------------------------
+# Load prior waveform sample so we do NOT reuse those clicks
+# ------------------------------------------------------------
+
+old_sample_file <- file.path(
+  old_waveform_dir,
+  paste0("waveform_sample_25_clicks_per_cluster_channel_", selected_wave_channel, ".csv")
+)
+
+if (!file.exists(old_sample_file)) {
+  stop(
+    "Could not find the previous waveform sample table:\n",
+    old_sample_file,
+    "\n\nRun the original waveform sampling first, or check the old_waveform_dir path."
+  )
+}
+
+old_sampled_uids <- read_csv(old_sample_file, show_col_types = FALSE) %>%
+  transmute(UID = as.character(UID)) %>%
+  distinct()
+
+cat("Previous sampled UIDs to exclude:", nrow(old_sampled_uids), "\n\n")
+
+# ------------------------------------------------------------
+# Create new sample: 25 unused clicks per cluster
+# ------------------------------------------------------------
+
+available_for_new_sample <- sampled_clicks %>%
+  filter(
+    HDBSCAN_cluster %in% individual_grid_clusters,
+    !is.na(UID),
+    !is.na(BinaryFile),
+    !is.na(DriftID_clean)
+  ) %>%
+  anti_join(old_sampled_uids, by = "UID")
+
+cluster_availability <- available_for_new_sample %>%
+  count(HDBSCAN_cluster, name = "n_available_after_excluding_prior") %>%
+  arrange(as.numeric(HDBSCAN_cluster))
+
+cat("Available unused clicks per cluster:\n")
+print(cluster_availability, n = Inf)
+
+clusters_with_too_few <- cluster_availability %>%
+  filter(n_available_after_excluding_prior < waveform_sample_n)
+
+if (nrow(clusters_with_too_few) > 0) {
+  stop(
+    "At least one cluster has fewer than ",
+    waveform_sample_n,
+    " unused clicks after excluding the prior waveform sample:\n",
+    paste(clusters_with_too_few$HDBSCAN_cluster, collapse = ", ")
+  )
+}
+
+waveform_sample_keys <- available_for_new_sample %>%
+  group_by(HDBSCAN_cluster) %>%
+  slice_sample(n = waveform_sample_n) %>%
+  ungroup() %>%
+  mutate(
+    HDBSCAN_cluster = factor(
+      HDBSCAN_cluster,
+      levels = individual_grid_clusters
+    )
+  ) %>%
+  arrange(HDBSCAN_cluster, DriftID_clean, BinaryFile, UID)
+
+waveform_sample_manifest <- waveform_sample_keys %>%
+  left_join(
+    manifest_clean %>%
+      select(
+        DriftID_clean,
+        BinaryFile,
+        full_path,
+        pgdx_full_path
+      ),
+    by = c("DriftID_clean", "BinaryFile")
+  )
+
+missing_binary_paths <- waveform_sample_manifest %>%
+  filter(is.na(full_path) | !file.exists(full_path))
+
+if (nrow(missing_binary_paths) > 0) {
+  print(
+    missing_binary_paths %>%
+      select(HDBSCAN_cluster, EventID, DriftID_clean, BinaryFile, UID, full_path),
+    n = Inf
+  )
+  
+  stop("Some newly sampled clicks do not have valid PAMGuard binary paths.")
+}
+
+cat("\nNew sampled clicks per cluster:\n")
+waveform_sample_manifest %>%
+  count(HDBSCAN_cluster, name = "n_sampled_clicks") %>%
+  arrange(as.numeric(as.character(HDBSCAN_cluster))) %>%
+  print(n = Inf)
+
+waveform_sample_file <- file.path(
+  new_waveform_dir,
+  paste0(
+    "waveform_sample_25_clicks_per_cluster_EXCLUDING_PRIOR_channel_",
+    selected_wave_channel,
+    ".csv"
+  )
+)
+
+write_csv(waveform_sample_manifest, waveform_sample_file)
+
+cat("\nSaved new waveform sample table to:\n")
+cat(waveform_sample_file, "\n\n")
+
+# ------------------------------------------------------------
+# Helper: extract one normalized waveform
+# ------------------------------------------------------------
+
+extract_one_waveform <- function(raw_click, channel = selected_wave_channel, normalize = TRUE) {
+  
+  wave_matrix <- raw_click$wave
+  
+  if (is.null(wave_matrix)) {
+    stop("This raw click does not contain a wave field.")
+  }
+  
+  if (!is.matrix(wave_matrix)) {
+    wave_matrix <- as.matrix(wave_matrix)
+  }
+  
+  n_samples <- nrow(wave_matrix)
+  n_channels <- ncol(wave_matrix)
+  
+  if (channel > n_channels) {
+    stop(
+      "Requested channel ",
+      channel,
+      ", but this click only has ",
+      n_channels,
+      " channel(s)."
+    )
+  }
+  
+  waveform <- wave_matrix[, channel]
+  
+  if (normalize) {
+    max_abs_amp <- max(abs(waveform), na.rm = TRUE)
+    
+    if (is.finite(max_abs_amp) && max_abs_amp > 0) {
+      waveform <- waveform / max_abs_amp
+    }
+  }
+  
+  tibble(
+    sample_index = seq_len(n_samples),
+    amplitude = as.numeric(waveform),
+    wave_channel_used = channel,
+    n_channels = n_channels,
+    n_samples = n_samples,
+    UID = as.character(raw_click$UID),
+    sampleDuration = as.integer(raw_click$sampleDuration),
+    maxAmplitude = as.numeric(raw_click$maxAmplitude)
+  )
+}
+
+# ------------------------------------------------------------
+# Helper: read selected waveforms from one binary file
+# ------------------------------------------------------------
+
+read_sampled_waveforms_from_binary <- function(binary_sample_df) {
+  
+  this_drift <- unique(binary_sample_df$DriftID_clean)
+  this_binary <- unique(binary_sample_df$BinaryFile)
+  this_path <- unique(binary_sample_df$full_path)
+  
+  if (length(this_drift) != 1 || length(this_binary) != 1 || length(this_path) != 1) {
+    stop("Each binary_sample_df must correspond to exactly one DriftID_clean + BinaryFile + full_path.")
+  }
+  
+  needed_uids_chr <- unique(as.character(binary_sample_df$UID))
+  needed_uids_num <- suppressWarnings(as.numeric(needed_uids_chr))
+  
+  cat("Reading:", this_drift, "|", this_binary, "|", length(needed_uids_chr), "sampled UID(s)\n")
+  
+  out <- tryCatch({
+    
+    pg <- PamBinaries::loadPamguardBinaryFile(
+      fileName = this_path,
+      skipLarge = FALSE,
+      skipData = FALSE,
+      keepUIDs = needed_uids_num,
+      convertDate = TRUE
+    )
+    
+    available_uids <- names(pg$data)
+    
+    map_dfr(seq_len(nrow(binary_sample_df)), function(i) {
+      
+      click_meta <- binary_sample_df[i, ]
+      uid_chr <- as.character(click_meta$UID)
+      
+      if (!uid_chr %in% available_uids) {
+        warning(
+          "UID not found in loaded binary: ",
+          uid_chr,
+          " | ",
+          this_binary
+        )
+        
+        return(tibble())
+      }
+      
+      raw_click <- pg$data[[uid_chr]]
+      
+      extract_one_waveform(
+        raw_click = raw_click,
+        channel = selected_wave_channel,
+        normalize = TRUE
+      ) %>%
+        mutate(
+          HDBSCAN_cluster = as.character(click_meta$HDBSCAN_cluster),
+          EventID = as.character(click_meta$EventID),
+          DriftID_clean = as.character(click_meta$DriftID_clean),
+          BinaryFile = as.character(click_meta$BinaryFile),
+          waveform_panel_id = paste0(
+            "Cluster ",
+            as.character(click_meta$HDBSCAN_cluster),
+            " | UID ",
+            uid_chr
+          )
+        )
+    })
+    
+  }, error = function(e) {
+    
+    warning(
+      "Failed to read binary: ",
+      this_path,
+      "\nError: ",
+      e$message
+    )
+    
+    tibble()
+  })
+  
+  return(out)
+}
+
+# ------------------------------------------------------------
+# Extract all newly sampled waveforms
+# ------------------------------------------------------------
+
+waveform_binary_groups <- waveform_sample_manifest %>%
+  mutate(
+    UID = as.character(UID),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster)
+  ) %>%
+  group_by(DriftID_clean, BinaryFile, full_path) %>%
+  group_split()
+
+cat("Number of binary files to read:", length(waveform_binary_groups), "\n\n")
+
+sampled_waveforms_long <- map_dfr(
+  waveform_binary_groups,
+  read_sampled_waveforms_from_binary
+)
+
+cat("\nFinished waveform extraction.\n\n")
+
+if (nrow(sampled_waveforms_long) == 0) {
+  stop("No waveforms were extracted. Check binary paths, UIDs, and PamBinaries loading.")
+}
+
+# ------------------------------------------------------------
+# Verify extraction
+# ------------------------------------------------------------
+
+cat("Extracted waveforms per cluster:\n")
+
+sampled_waveforms_long %>%
+  distinct(HDBSCAN_cluster, UID) %>%
+  count(HDBSCAN_cluster, name = "n_waveforms_extracted") %>%
+  arrange(as.numeric(HDBSCAN_cluster)) %>%
+  print(n = Inf)
+
+expected_waveform_keys <- waveform_sample_manifest %>%
+  transmute(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    DriftID_clean = as.character(DriftID_clean),
+    BinaryFile = as.character(BinaryFile),
+    UID = as.character(UID)
+  ) %>%
+  distinct()
+
+extracted_waveform_keys <- sampled_waveforms_long %>%
+  transmute(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    DriftID_clean = as.character(DriftID_clean),
+    BinaryFile = as.character(BinaryFile),
+    UID = as.character(UID)
+  ) %>%
+  distinct()
+
+missing_waveform_keys <- expected_waveform_keys %>%
+  anti_join(
+    extracted_waveform_keys,
+    by = c("HDBSCAN_cluster", "DriftID_clean", "BinaryFile", "UID")
+  )
+
+if (nrow(missing_waveform_keys) > 0) {
+  cat("\nWARNING: Some newly sampled clicks were not extracted:\n")
+  print(missing_waveform_keys, n = Inf)
+} else {
+  cat("\nAll newly sampled clicks were successfully extracted.\n")
+}
+
+waveform_long_file <- file.path(
+  new_waveform_dir,
+  paste0(
+    "sampled_waveforms_long_25_per_cluster_EXCLUDING_PRIOR_channel_",
+    selected_wave_channel,
+    ".rds"
+  )
+)
+
+saveRDS(sampled_waveforms_long, waveform_long_file)
+
+cat("\nSaved extracted waveform data to:\n")
+cat(waveform_long_file, "\n\n")
+
+# ------------------------------------------------------------
+# Prepare plotting data
+# ------------------------------------------------------------
+
+waveform_panel_lookup <- sampled_waveforms_long %>%
+  distinct(
+    HDBSCAN_cluster,
+    EventID,
+    DriftID_clean,
+    BinaryFile,
+    UID
+  ) %>%
+  arrange(
+    as.numeric(HDBSCAN_cluster),
+    EventID,
+    DriftID_clean,
+    BinaryFile,
+    UID
+  ) %>%
+  group_by(HDBSCAN_cluster) %>%
+  mutate(
+    waveform_number = row_number(),
+    waveform_facet_label = paste0("Click ", waveform_number, "\nUID ", UID)
+  ) %>%
+  ungroup()
+
+sampled_waveforms_for_plot <- sampled_waveforms_long %>%
+  left_join(
+    waveform_panel_lookup,
+    by = c(
+      "HDBSCAN_cluster",
+      "EventID",
+      "DriftID_clean",
+      "BinaryFile",
+      "UID"
+    )
+  ) %>%
+  mutate(
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    waveform_facet_label = factor(
+      waveform_facet_label,
+      levels = waveform_panel_lookup$waveform_facet_label
+    )
+  )
+
+# ------------------------------------------------------------
+# Save individual 5x5 waveform grids for each cluster
+# ------------------------------------------------------------
+
+make_cluster_waveform_grid <- function(cluster_id) {
+  
+  cluster_id <- as.character(cluster_id)
+  
+  cluster_plot_data <- sampled_waveforms_for_plot %>%
+    filter(HDBSCAN_cluster == cluster_id)
+  
+  n_waveforms <- cluster_plot_data %>%
+    distinct(UID, EventID, DriftID_clean, BinaryFile) %>%
+    nrow()
+  
+  if (n_waveforms != 25) {
+    warning(
+      "Cluster ",
+      cluster_id,
+      " has ",
+      n_waveforms,
+      " waveforms instead of 25."
+    )
+  }
+  
+  cluster_line_color <- cluster_colors[[cluster_id]]
+  
+  ggplot(
+    cluster_plot_data,
+    aes(x = sample_index, y = amplitude)
+  ) +
+    geom_hline(
+      yintercept = 0,
+      linewidth = 0.2,
+      color = "grey70"
+    ) +
+    geom_line(
+      linewidth = 0.25,
+      color = cluster_line_color
+    ) +
+    facet_wrap(
+      ~ waveform_facet_label,
+      ncol = 5,
+      nrow = 5
+    ) +
+    coord_cartesian(
+      ylim = c(-1, 1)
+    ) +
+    labs(
+      title = paste0("Cluster ", cluster_id, " Waveforms"),
+      subtitle = paste0(
+        "25 newly sampled clicks; previous waveform sample excluded; channel ",
+        selected_wave_channel,
+        "; normalized amplitude"
+      ),
+      x = "Sample index",
+      y = "Normalized amplitude"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      strip.text = element_text(size = 6),
+      plot.title = element_text(face = "bold", size = 15),
+      plot.subtitle = element_text(size = 10),
+      axis.text = element_text(size = 7),
+      axis.title = element_text(size = 10),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(linewidth = 0.2),
+      panel.spacing = unit(0.35, "lines")
+    )
+}
+
+individual_grid_files <- map_chr(individual_grid_clusters, function(cluster_id) {
+  
+  p_cluster <- make_cluster_waveform_grid(cluster_id)
+  
+  out_file <- file.path(
+    new_waveform_dir,
+    paste0(
+      "cluster_",
+      cluster_id,
+      "_waveforms_5x5_25_clicks_EXCLUDING_PRIOR_channel_",
+      selected_wave_channel,
+      ".png"
+    )
+  )
+  
+  ggsave(
+    filename = out_file,
+    plot = p_cluster,
+    width = 10,
+    height = 9,
+    dpi = 300
+  )
+  
+  cat("Saved:", out_file, "\n")
+  
+  out_file
+})
+
+print(make_cluster_waveform_grid("0"))
+
+# ------------------------------------------------------------
+# Save 3x3 composite waveform grid for clusters 1-9
+# ------------------------------------------------------------
+
+make_compact_cluster_waveform_grid <- function(cluster_id) {
+  
+  cluster_id <- as.character(cluster_id)
+  
+  cluster_plot_data <- sampled_waveforms_for_plot %>%
+    filter(HDBSCAN_cluster == cluster_id) %>%
+    mutate(
+      waveform_number = factor(
+        waveform_number,
+        levels = 1:25
+      )
+    )
+  
+  n_waveforms <- cluster_plot_data %>%
+    distinct(UID, EventID, DriftID_clean, BinaryFile) %>%
+    nrow()
+  
+  if (n_waveforms != 25) {
+    warning(
+      "Cluster ",
+      cluster_id,
+      " has ",
+      n_waveforms,
+      " waveforms instead of 25."
+    )
+  }
+  
+  cluster_line_color <- cluster_colors[[cluster_id]]
+  
+  ggplot(
+    cluster_plot_data,
+    aes(x = sample_index, y = amplitude)
+  ) +
+    geom_hline(
+      yintercept = 0,
+      linewidth = 0.15,
+      color = "grey75"
+    ) +
+    geom_line(
+      linewidth = 0.18,
+      color = cluster_line_color
+    ) +
+    facet_wrap(
+      ~ waveform_number,
+      ncol = 5,
+      nrow = 5
+    ) +
+    coord_cartesian(
+      ylim = c(-1, 1)
+    ) +
+    labs(
+      title = paste0("Cluster ", cluster_id),
+      x = NULL,
+      y = NULL
+    ) +
+    theme_bw(base_size = 8) +
+    theme(
+      plot.title = element_text(
+        face = "bold",
+        size = 11,
+        hjust = 0.5
+      ),
+      strip.text = element_blank(),
+      strip.background = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(linewidth = 0.12),
+      panel.spacing = unit(0.12, "lines"),
+      plot.margin = margin(4, 4, 4, 4)
+    )
+}
+
+composite_cluster_plots <- map(
+  composite_grid_clusters,
+  make_compact_cluster_waveform_grid
+)
+
+p_composite_waveforms <- wrap_plots(
+  composite_cluster_plots,
+  ncol = 3,
+  nrow = 3
+) +
+  plot_annotation(
+    title = "New Sampled Waveforms by HDBSCAN Cluster",
+    subtitle = paste0(
+      "Clusters 1-9 only; 25 newly sampled clicks per cluster; previous waveform sample excluded; channel ",
+      selected_wave_channel,
+      "; normalized amplitude"
+    ),
+    theme = theme(
+      plot.title = element_text(
+        face = "bold",
+        size = 18,
+        hjust = 0.5
+      ),
+      plot.subtitle = element_text(
+        size = 12,
+        hjust = 0.5
+      )
+    )
+  )
+
+print(p_composite_waveforms)
+
+composite_file <- file.path(
+  new_waveform_dir,
+  paste0(
+    "clusters_1_to_9_waveforms_composite_3x3_each_5x5_EXCLUDING_PRIOR_channel_",
+    selected_wave_channel,
+    ".png"
+  )
+)
+
+ggsave(
+  filename = composite_file,
+  plot = p_composite_waveforms,
+  width = 18,
+  height = 16,
+  dpi = 300
+)
+
+cat("\nSaved composite waveform figure to:\n")
+cat(composite_file, "\n")
+
+cat("\nDONE. New outputs saved in:\n")
+cat(new_waveform_dir, "\n")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
