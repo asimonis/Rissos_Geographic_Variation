@@ -1,0 +1,1854 @@
+---
+title: "Event_Level_Peak_Notch_Tables_18PC_scaledICI1_minPts50_Permissive_AllRegions"
+author: "Sarah Moseley"
+date: "2026-06-08"
+output: html_document
+---
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+required_packages <- c(
+  "dplyr",
+  "readr",
+  "tibble",
+  "tidyr",
+  "purrr",
+  "pracma",
+  "gt",
+  "stringr",
+  "ggplot2"
+)
+
+missing_packages <- required_packages[
+  !sapply(required_packages, requireNamespace, quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing required packages: ",
+    paste(missing_packages, collapse = ", "),
+    "\nInstall them before running this script."
+  )
+}
+
+library(dplyr)
+library(readr)
+library(tibble)
+library(tidyr)
+library(purrr)
+library(pracma)
+library(gt)
+
+```
+
+## Load Saved Inputs
+
+```{r load_saved_inputs, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Input files
+# ------------------------------------------------------------
+
+hdbscan_assignments_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables/FULL_hdbscan_assignments_18PC_scaledICI_1_minPts50.csv"
+
+sampled_spectra_matrix_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/data/sampled_minmax_spectra_matrix_19_50_khz_18PC.rds"
+
+frequency_grid_file <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/tables/frequency_grid_19_50_khz.csv"
+
+# ------------------------------------------------------------
+# Output folders
+# ------------------------------------------------------------
+
+event_peak_notch_base_dir <- "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/Event_Level_Peak_Notch_Tables_Permissive_After_Soldevilla_AllRegions"
+
+event_peak_notch_table_dir <- file.path(
+  event_peak_notch_base_dir,
+  "tables"
+)
+
+event_peak_notch_plot_dir <- file.path(
+  event_peak_notch_base_dir,
+  "plots"
+)
+
+dir.create(
+  event_peak_notch_table_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  event_peak_notch_plot_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# ------------------------------------------------------------
+# Load files
+# ------------------------------------------------------------
+
+hdbscan_assignments <- readr::read_csv(
+  hdbscan_assignments_file,
+  show_col_types = FALSE
+)
+
+sampled_spectra_matrix <- readRDS(
+  sampled_spectra_matrix_file
+)
+
+frequency_grid <- readr::read_csv(
+  frequency_grid_file,
+  show_col_types = FALSE
+)
+
+# ------------------------------------------------------------
+# Standardize key columns
+# ------------------------------------------------------------
+
+hdbscan_assignments <- hdbscan_assignments %>%
+  mutate(
+    EventID = as.character(EventID),
+    HDBSCAN_cluster = as.character(HDBSCAN_cluster),
+    RowID = as.integer(RowID)
+  )
+
+frequency_grid <- frequency_grid %>%
+  mutate(
+    Frequency_kHz = as.numeric(Frequency_kHz)
+  )
+
+# ------------------------------------------------------------
+# Basic previews
+# ------------------------------------------------------------
+
+cat("HDBSCAN assignment columns:\n")
+print(names(hdbscan_assignments))
+
+cat("\nRows in HDBSCAN assignments:\n")
+print(nrow(hdbscan_assignments))
+
+cat("\nDimensions of sampled spectra matrix:\n")
+print(dim(sampled_spectra_matrix))
+
+cat("\nRows in frequency grid:\n")
+print(nrow(frequency_grid))
+
+cat("\nNumber of events represented:\n")
+print(dplyr::n_distinct(hdbscan_assignments$EventID))
+
+cat("\nClusters represented:\n")
+print(sort(unique(hdbscan_assignments$HDBSCAN_cluster)))
+
+cat("\nFrequency range:\n")
+print(range(frequency_grid$Frequency_kHz, na.rm = TRUE))
+
+# ------------------------------------------------------------
+# Critical alignment checks
+# ------------------------------------------------------------
+
+if (nrow(hdbscan_assignments) != nrow(sampled_spectra_matrix)) {
+  stop(
+    "FAIL: HDBSCAN assignment rows do not match sampled spectra matrix rows."
+  )
+}
+
+if (ncol(sampled_spectra_matrix) != nrow(frequency_grid)) {
+  stop(
+    "FAIL: Spectra matrix columns do not match frequency grid rows."
+  )
+}
+
+if (dplyr::n_distinct(hdbscan_assignments$EventID) != 48) {
+  warning(
+    "Expected 48 events, but found ",
+    dplyr::n_distinct(hdbscan_assignments$EventID),
+    ". Check this before continuing."
+  )
+}
+
+# ------------------------------------------------------------
+# Save a quick input summary
+# ------------------------------------------------------------
+
+input_summary <- tibble::tibble(
+  input_name = c(
+    "hdbscan_assignments",
+    "sampled_spectra_matrix",
+    "frequency_grid",
+    "n_events",
+    "n_clusters"
+  ),
+  value = c(
+    nrow(hdbscan_assignments),
+    paste(dim(sampled_spectra_matrix), collapse = " x "),
+    nrow(frequency_grid),
+    dplyr::n_distinct(hdbscan_assignments$EventID),
+    dplyr::n_distinct(hdbscan_assignments$HDBSCAN_cluster)
+  )
+)
+
+readr::write_csv(
+  input_summary,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_peak_notch_input_summary.csv"
+  )
+)
+
+cat("\nPASS: Saved inputs loaded and aligned.\n")
+cat("Output table folder:\n")
+cat(event_peak_notch_table_dir, "\n\n")
+
+cat("Output plot folder:\n")
+cat(event_peak_notch_plot_dir, "\n")
+
+```
+
+## Build Event-Level Mean Spectra
+## With and without noise cluster 0
+
+```{r build_event_level_mean_spectra, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Attach row IDs to preserve alignment between metadata and matrix
+# ------------------------------------------------------------
+
+hdbscan_assignments_indexed <- hdbscan_assignments %>%
+  mutate(
+    MatrixRowID = row_number()
+  )
+
+sampled_spectra_indexed <- as.data.frame(sampled_spectra_matrix) %>%
+  tibble::as_tibble() %>%
+  mutate(
+    MatrixRowID = row_number()
+  )
+
+# ------------------------------------------------------------
+# Name spectrum columns by actual frequency
+# ------------------------------------------------------------
+
+frequency_labels <- paste0(
+  "freq_",
+  sprintf("%.3f", frequency_grid$Frequency_kHz),
+  "_kHz"
+)
+
+spectra_value_cols <- frequency_labels
+
+names(sampled_spectra_indexed)[
+  names(sampled_spectra_indexed) != "MatrixRowID"
+] <- frequency_labels
+
+# ------------------------------------------------------------
+# Combine metadata + spectra
+# One row = one sampled click
+# ------------------------------------------------------------
+
+click_spectra_with_metadata <- hdbscan_assignments_indexed %>%
+  select(
+    MatrixRowID,
+    EventID,
+    DriftID_spectra,
+    UID,
+    HDBSCAN_cluster
+  ) %>%
+  left_join(
+    sampled_spectra_indexed,
+    by = "MatrixRowID"
+  )
+
+# ------------------------------------------------------------
+# Safety check
+# ------------------------------------------------------------
+
+if (nrow(click_spectra_with_metadata) != nrow(hdbscan_assignments)) {
+  stop("FAIL: Joining metadata to spectra changed the row count.")
+}
+
+cat("Rows in click-level spectra table:\n")
+print(nrow(click_spectra_with_metadata))
+
+cat("\nNumber of events:\n")
+print(n_distinct(click_spectra_with_metadata$EventID))
+
+cat("\nNumber of frequency columns:\n")
+print(length(spectra_value_cols))
+
+# ------------------------------------------------------------
+# Convert click-level spectra to long format
+# One row = one click at one frequency
+# ------------------------------------------------------------
+
+click_spectra_long <- click_spectra_with_metadata %>%
+  pivot_longer(
+    cols = all_of(spectra_value_cols),
+    names_to = "frequency_label",
+    values_to = "minmax_spectrum"
+  ) %>%
+  mutate(
+    Frequency_kHz = as.numeric(
+      stringr::str_remove_all(
+        stringr::str_remove_all(frequency_label, "freq_"),
+        "_kHz"
+      )
+    )
+  )
+
+cat("\nRows in long click spectra table:\n")
+print(nrow(click_spectra_long))
+
+cat("\nExpected rows:\n")
+print(nrow(hdbscan_assignments) * nrow(frequency_grid))
+
+# ------------------------------------------------------------
+# Event mean spectra WITH noise cluster 0 included
+# ------------------------------------------------------------
+
+event_mean_spectra_with_noise <- click_spectra_long %>%
+  group_by(
+    EventID,
+    DriftID_spectra,
+    Frequency_kHz
+  ) %>%
+  summarise(
+    mean_minmax_spectrum = mean(minmax_spectrum, na.rm = TRUE),
+    sd_minmax_spectrum = sd(minmax_spectrum, na.rm = TRUE),
+    n_clicks_used = n_distinct(MatrixRowID),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    output_group = "WITH_noise_cluster0_included"
+  ) %>%
+  arrange(
+    EventID,
+    Frequency_kHz
+  )
+
+# ------------------------------------------------------------
+# Event mean spectra WITHOUT noise cluster 0
+# ------------------------------------------------------------
+
+event_mean_spectra_no_noise <- click_spectra_long %>%
+  filter(HDBSCAN_cluster != "0") %>%
+  group_by(
+    EventID,
+    DriftID_spectra,
+    Frequency_kHz
+  ) %>%
+  summarise(
+    mean_minmax_spectrum = mean(minmax_spectrum, na.rm = TRUE),
+    sd_minmax_spectrum = sd(minmax_spectrum, na.rm = TRUE),
+    n_clicks_used = n_distinct(MatrixRowID),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    output_group = "NO_noise_cluster0_excluded"
+  ) %>%
+  arrange(
+    EventID,
+    Frequency_kHz
+  )
+
+# ------------------------------------------------------------
+# Combine both output groups
+# ------------------------------------------------------------
+
+event_mean_spectra_all_groups <- bind_rows(
+  event_mean_spectra_with_noise,
+  event_mean_spectra_no_noise
+)
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("\nEvent counts by output group:\n")
+
+event_count_check <- event_mean_spectra_all_groups %>%
+  distinct(output_group, EventID) %>%
+  count(output_group, name = "n_events")
+
+print(event_count_check)
+
+cat("\nFrequency-bin counts by output group:\n")
+
+frequency_count_check <- event_mean_spectra_all_groups %>%
+  group_by(output_group, EventID) %>%
+  summarise(
+    n_frequency_bins = n_distinct(Frequency_kHz),
+    .groups = "drop"
+  ) %>%
+  count(output_group, n_frequency_bins)
+
+print(frequency_count_check)
+
+cat("\nPreview: event mean spectra WITH noise:\n")
+print(head(event_mean_spectra_with_noise, 10))
+
+cat("\nPreview: event mean spectra NO noise:\n")
+print(head(event_mean_spectra_no_noise, 10))
+
+# ------------------------------------------------------------
+# Save event mean spectra tables
+# ------------------------------------------------------------
+
+readr::write_csv(
+  event_mean_spectra_with_noise,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_mean_spectra_WITH_noise_cluster0_included.csv"
+  )
+)
+
+readr::write_csv(
+  event_mean_spectra_no_noise,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_mean_spectra_NO_noise_cluster0_excluded.csv"
+  )
+)
+
+readr::write_csv(
+  event_mean_spectra_all_groups,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_mean_spectra_ALL_groups.csv"
+  )
+)
+
+cat("\nPASS: Event-level mean spectra created and saved.\n")
+cat("Saved to:\n")
+cat(event_peak_notch_table_dir, "\n")
+
+```
+
+## Pick Peaks and Notches From Event-Level Mean Spectra
+## Permissive settings after Soldevilla comparison
+
+```{r pick_event_level_peaks_and_notches, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Helper function: pick peaks/notches for one event spectrum
+# ------------------------------------------------------------
+
+pick_features_one_event <- function(one_event_spectrum) {
+  
+  one_event_spectrum <- one_event_spectrum %>%
+    arrange(Frequency_kHz)
+  
+  event_id <- unique(one_event_spectrum$EventID)
+  drift_id <- unique(one_event_spectrum$DriftID_spectra)
+  output_group_id <- unique(one_event_spectrum$output_group)
+  
+  if (length(event_id) != 1 || length(output_group_id) != 1) {
+    stop("Input to pick_features_one_event should contain exactly one event and one output group.")
+  }
+  
+  # --------------------------
+  # Peaks
+  # --------------------------
+  
+  peak_matrix <- pracma::findpeaks(
+    one_event_spectrum$mean_minmax_spectrum,
+    nups = 1,
+    ndowns = 1,
+    minpeakdistance = 1,
+    minpeakheight = 0.15
+  )
+  
+  if (is.null(peak_matrix)) {
+    
+    peaks_df <- tibble()
+    
+  } else {
+    
+    peaks_df <- tibble(
+      output_group = output_group_id,
+      EventID = event_id,
+      DriftID_spectra = drift_id,
+      feature_type = "Peak",
+      feature_height = peak_matrix[, 1],
+      feature_index = peak_matrix[, 2],
+      feature_start_index = peak_matrix[, 3],
+      feature_end_index = peak_matrix[, 4],
+      Frequency_kHz = one_event_spectrum$Frequency_kHz[feature_index]
+    )
+  }
+  
+  # --------------------------
+  # Notches
+  # Notches are peaks in the inverted spectrum.
+  # --------------------------
+  
+  notch_matrix <- pracma::findpeaks(
+    -one_event_spectrum$mean_minmax_spectrum,
+    nups = 1,
+    ndowns = 1,
+    minpeakdistance = 1,
+    minpeakheight = -0.85
+  )
+  
+  if (is.null(notch_matrix)) {
+    
+    notches_df <- tibble()
+    
+  } else {
+    
+    notches_df <- tibble(
+      output_group = output_group_id,
+      EventID = event_id,
+      DriftID_spectra = drift_id,
+      feature_type = "Notch",
+      feature_height = one_event_spectrum$mean_minmax_spectrum[notch_matrix[, 2]],
+      feature_index = notch_matrix[, 2],
+      feature_start_index = notch_matrix[, 3],
+      feature_end_index = notch_matrix[, 4],
+      Frequency_kHz = one_event_spectrum$Frequency_kHz[feature_index]
+    )
+  }
+  
+  bind_rows(
+    peaks_df,
+    notches_df
+  ) %>%
+    arrange(
+      feature_type,
+      Frequency_kHz
+    )
+}
+
+# ------------------------------------------------------------
+# Run feature picking for every event in both output groups
+# ------------------------------------------------------------
+
+event_peak_notch_features_raw <- event_mean_spectra_all_groups %>%
+  group_by(output_group, EventID) %>%
+  group_split() %>%
+  purrr::map_dfr(pick_features_one_event)
+
+# ------------------------------------------------------------
+# Rank features within each event from low to high frequency
+# Keep first 4 peaks and first 3 notches
+# ------------------------------------------------------------
+
+event_peak_notch_features_ranked <- event_peak_notch_features_raw %>%
+  group_by(
+    output_group,
+    EventID,
+    feature_type
+  ) %>%
+  arrange(
+    Frequency_kHz,
+    .by_group = TRUE
+  ) %>%
+  mutate(
+    feature_rank = row_number(),
+    feature_label = paste(feature_type, feature_rank)
+  ) %>%
+  ungroup() %>%
+  filter(
+    (feature_type == "Peak" & feature_rank <= 4) |
+      (feature_type == "Notch" & feature_rank <= 3)
+  ) %>%
+  arrange(
+    output_group,
+    EventID,
+    feature_type,
+    feature_rank
+  )
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("Raw detected features:\n")
+print(
+  event_peak_notch_features_raw %>%
+    count(output_group, feature_type, name = "n_features_detected")
+)
+
+cat("\nRanked retained features:\n")
+print(
+  event_peak_notch_features_ranked %>%
+    count(output_group, feature_type, feature_label, name = "n_events_with_feature") %>%
+    arrange(output_group, feature_type, feature_label)
+)
+
+cat("\nEvents missing one or more expected features:\n")
+
+expected_features <- tidyr::expand_grid(
+  output_group = unique(event_mean_spectra_all_groups$output_group),
+  EventID = unique(event_mean_spectra_all_groups$EventID),
+  feature_label = c(
+    "Peak 1", "Peak 2", "Peak 3", "Peak 4",
+    "Notch 1", "Notch 2", "Notch 3"
+  )
+)
+
+missing_feature_check <- expected_features %>%
+  left_join(
+    event_peak_notch_features_ranked %>%
+      distinct(output_group, EventID, feature_label) %>%
+      mutate(feature_found = TRUE),
+    by = c("output_group", "EventID", "feature_label")
+  ) %>%
+  mutate(
+    feature_found = if_else(is.na(feature_found), FALSE, feature_found)
+  ) %>%
+  filter(!feature_found)
+
+print(missing_feature_check, n = 100)
+
+cat("\nPreview of ranked event-level peak/notch features:\n")
+print(event_peak_notch_features_ranked, n = 50)
+
+# ------------------------------------------------------------
+# Save feature tables
+# ------------------------------------------------------------
+
+readr::write_csv(
+  event_peak_notch_features_raw,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_peak_notch_features_RAW_all_detected.csv"
+  )
+)
+
+readr::write_csv(
+  event_peak_notch_features_ranked,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_peak_notch_features_RANKED_first4peaks_first3notches.csv"
+  )
+)
+
+readr::write_csv(
+  missing_feature_check,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_peak_notch_missing_feature_check.csv"
+  )
+)
+
+cat("\nPASS: Event-level peaks and notches picked, ranked, and saved.\n")
+cat("Saved to:\n")
+cat(event_peak_notch_table_dir, "\n")
+
+```
+
+## Build Event-Level Peak/Notch Summary Statistics
+## Mean ± SD across event-level mean spectra
+
+```{r build_event_peak_notch_summary_statistics, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Soldevilla reference values from Table IV
+# ------------------------------------------------------------
+
+soldevilla_reference <- tibble::tibble(
+  Region = rep(c("PPac", "CC"), each = 7),
+  
+  feature_label = rep(
+    c(
+      "Peak 1", "Peak 2", "Peak 3", "Peak 4",
+      "Notch 1", "Notch 2", "Notch 3"
+    ),
+    times = 2
+  ),
+  
+  mean_frequency_khz = c(
+    # PPac
+    23.5, 26.6, 31.7, 36.0,
+    25.4, 28.7, 33.5,
+    
+    # CC
+    21.8, 24.8, 31.2, 37.9,
+    23.4, 27.0, 34.5
+  ),
+  
+  sd_frequency_khz = c(
+    # PPac
+    0.9, 1.5, 0.6, 2.1,
+    0.9, 1.2, 0.8,
+    
+    # CC
+    1.0, 1.0, 1.0, 2.3,
+    1.2, 0.9, 1.3
+  )
+) %>%
+  mutate(
+    summary_value = sprintf(
+      "%.1f ± %.1f",
+      mean_frequency_khz,
+      sd_frequency_khz
+    )
+  )
+
+# ------------------------------------------------------------
+# Our event-level summary statistics
+# Mean ± SD across events, not clusters
+# ------------------------------------------------------------
+
+event_peak_notch_summary <- event_peak_notch_features_ranked %>%
+  group_by(
+    output_group,
+    feature_type,
+    feature_rank,
+    feature_label
+  ) %>%
+  summarise(
+    mean_frequency_khz = mean(Frequency_kHz, na.rm = TRUE),
+    sd_frequency_khz = sd(Frequency_kHz, na.rm = TRUE),
+    n_events_with_feature = n_distinct(EventID),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Region = case_when(
+      output_group == "WITH_noise_cluster0_included" ~ "Our Data: events with noise",
+      output_group == "NO_noise_cluster0_excluded" ~ "Our Data: events no noise",
+      TRUE ~ output_group
+    ),
+    
+    summary_value = sprintf(
+      "%.1f ± %.1f",
+      mean_frequency_khz,
+      sd_frequency_khz
+    ),
+    
+    summary_value_with_n = sprintf(
+      "%.1f ± %.1f (n=%s)",
+      mean_frequency_khz,
+      sd_frequency_khz,
+      n_events_with_feature
+    )
+  ) %>%
+  arrange(
+    output_group,
+    feature_type,
+    feature_rank
+  )
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("Soldevilla reference values:\n")
+print(soldevilla_reference)
+
+cat("\nEvent-level peak/notch summary:\n")
+print(event_peak_notch_summary, n = Inf)
+
+cat("\nFeature sample sizes:\n")
+print(
+  event_peak_notch_summary %>%
+    select(
+      output_group,
+      feature_label,
+      n_events_with_feature
+    ) %>%
+    arrange(output_group, feature_label),
+  n = Inf
+)
+
+# ------------------------------------------------------------
+# Save summary statistics
+# ------------------------------------------------------------
+
+readr::write_csv(
+  soldevilla_reference,
+  file.path(
+    event_peak_notch_table_dir,
+    "soldevilla_reference_values.csv"
+  )
+)
+
+readr::write_csv(
+  event_peak_notch_summary,
+  file.path(
+    event_peak_notch_table_dir,
+    "event_level_peak_notch_summary_statistics.csv"
+  )
+)
+
+cat("\nPASS: Event-level summary statistics created and saved.\n")
+cat("Saved to:\n")
+cat(event_peak_notch_table_dir, "\n")
+
+```
+
+## Expanded Soldevilla Reference Table
+## Includes SEUS, NEUS, GoMx, IPH, PPac, and CC
+
+```{r expanded_soldevilla_reference_table, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Expanded Soldevilla reference values from Table IV
+# Regions:
+# SEUS = Southeastern Shelf
+# NEUS = Northeastern Shelf
+# GoMx = Gulf of Mexico
+# IPH  = Insular Pacific-Hawaiian
+# PPac = Pelagic Pacific
+# CC   = California Current
+# ------------------------------------------------------------
+
+soldevilla_reference_expanded <- tibble::tibble(
+  
+  Region = rep(
+    c("SEUS", "NEUS", "GoMx", "IPH", "PPac", "CC"),
+    each = 7
+  ),
+  
+  N = rep(
+    c(15, 8, 7, 8, 6, 25),
+    each = 7
+  ),
+  
+  feature_label = rep(
+    c(
+      "Peak 1", "Peak 2", "Peak 3", "Peak 4",
+      "Notch 1", "Notch 2", "Notch 3"
+    ),
+    times = 6
+  ),
+  
+  mean_frequency_khz = c(
+    
+    # SEUS
+    23.1, 26.8, 33.3, 39.3,
+    24.8, 28.8, 36.2,
+    
+    # NEUS
+    22.1, 26.1, 31.5, 37.2,
+    23.9, 28.1, 33.8,
+    
+    # GoMx
+    22.4, 25.6, 30.4, 36.5,
+    23.8, 27.2, 32.5,
+    
+    # IPH
+    24.5, 27.3, 33.5, 39.1,
+    25.9, 29.4, 36.2,
+    
+    # PPac
+    23.5, 26.6, 31.7, 36.0,
+    25.4, 28.7, 33.5,
+    
+    # CC
+    21.8, 24.8, 31.2, 37.9,
+    23.4, 27.0, 34.5
+  ),
+  
+  sd_frequency_khz = c(
+    
+    # SEUS
+    1.0, 0.7, 0.7, 3.0,
+    0.9, 0.8, 1.1,
+    
+    # NEUS
+    1.0, 1.0, 2.1, 4.5,
+    0.8, 1.2, 2.7,
+    
+    # GoMx
+    1.0, 1.1, 2.8, 4.3,
+    0.5, 0.8, 2.9,
+    
+    # IPH
+    0.5, 0.6, 0.9, 3.4,
+    0.8, 0.3, 1.8,
+    
+    # PPac
+    0.9, 1.5, 0.6, 2.1,
+    0.9, 1.2, 0.8,
+    
+    # CC
+    1.0, 1.0, 1.0, 2.3,
+    1.2, 0.9, 1.3
+  )
+) %>%
+  mutate(
+    summary_value = sprintf(
+      "%.1f ± %.1f",
+      mean_frequency_khz,
+      sd_frequency_khz
+    ),
+    
+    Region_with_N = paste0(
+      Region,
+      "\nN = ",
+      N
+    )
+  )
+
+# ------------------------------------------------------------
+# Sanity check
+# ------------------------------------------------------------
+
+cat("Expanded Soldevilla reference table:\n")
+print(soldevilla_reference_expanded, n = Inf)
+
+cat("\nRegion counts:\n")
+print(
+  soldevilla_reference_expanded %>%
+    count(Region, N)
+)
+
+cat("\nFeature counts:\n")
+print(
+  soldevilla_reference_expanded %>%
+    count(feature_label)
+)
+
+# ------------------------------------------------------------
+# Save expanded reference table
+# ------------------------------------------------------------
+
+readr::write_csv(
+  soldevilla_reference_expanded,
+  file.path(
+    event_peak_notch_table_dir,
+    "soldevilla_reference_values_EXPANDED_all_regions.csv"
+  )
+)
+
+cat("\nPASS: Expanded Soldevilla reference table created and saved.\n")
+
+```
+
+## Build Expanded Regional Comparison Tables
+## All regions only
+## Duplicated for NO noise and WITH noise event-level summaries
+
+```{r build_expanded_regional_comparison_tables_all_regions_only, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Region set: all Soldevilla regions only
+# ------------------------------------------------------------
+
+all_soldevilla_regions <- c(
+  "SEUS",
+  "NEUS",
+  "GoMx",
+  "IPH",
+  "PPac",
+  "CC"
+)
+
+# ------------------------------------------------------------
+# Helper: build one comparison table
+# ------------------------------------------------------------
+
+build_expanded_comparison_table <- function(
+    event_summary,
+    soldevilla_expanded,
+    output_group_to_use,
+    feature_type_to_use,
+    soldevilla_regions_to_use
+) {
+  
+  if (feature_type_to_use == "Peak") {
+    feature_levels <- c("Peak 1", "Peak 2", "Peak 3", "Peak 4")
+  } else if (feature_type_to_use == "Notch") {
+    feature_levels <- c("Notch 1", "Notch 2", "Notch 3")
+  } else {
+    stop("feature_type_to_use must be either 'Peak' or 'Notch'.")
+  }
+  
+  region_levels <- c(
+    soldevilla_regions_to_use,
+    "Our Data"
+  )
+  
+  # ------------------------------------------------------------
+  # Soldevilla values
+  # ------------------------------------------------------------
+  
+  soldevilla_part <- soldevilla_expanded %>%
+    filter(
+      Region %in% soldevilla_regions_to_use,
+      feature_label %in% feature_levels
+    ) %>%
+    mutate(
+      Region = factor(
+        Region,
+        levels = soldevilla_regions_to_use
+      )
+    ) %>%
+    select(
+      feature_label,
+      Region,
+      summary_value
+    )
+  
+  # ------------------------------------------------------------
+  # Our event-level values
+  # ------------------------------------------------------------
+  
+  our_data_part <- event_summary %>%
+    filter(
+      output_group == output_group_to_use,
+      feature_type == feature_type_to_use
+    ) %>%
+    mutate(
+      Region = "Our Data",
+      summary_value = sprintf(
+        "%.1f ± %.1f",
+        mean_frequency_khz,
+        sd_frequency_khz
+      )
+    ) %>%
+    select(
+      feature_label,
+      Region,
+      summary_value
+    )
+  
+  # ------------------------------------------------------------
+  # Combine and pivot
+  # ------------------------------------------------------------
+  
+  comparison_table <- bind_rows(
+    soldevilla_part,
+    our_data_part
+  ) %>%
+    mutate(
+      feature_label = factor(
+        feature_label,
+        levels = feature_levels
+      ),
+      Region = factor(
+        Region,
+        levels = region_levels
+      )
+    ) %>%
+    arrange(
+      feature_label,
+      Region
+    ) %>%
+    tidyr::pivot_wider(
+      names_from = Region,
+      values_from = summary_value
+    ) %>%
+    rename(
+      Feature = feature_label
+    )
+  
+  return(comparison_table)
+}
+
+# ------------------------------------------------------------
+# NO noise tables: all regions only
+# ------------------------------------------------------------
+
+peak_all_regions_no_noise <- build_expanded_comparison_table(
+  event_summary = event_peak_notch_summary,
+  soldevilla_expanded = soldevilla_reference_expanded,
+  output_group_to_use = "NO_noise_cluster0_excluded",
+  feature_type_to_use = "Peak",
+  soldevilla_regions_to_use = all_soldevilla_regions
+)
+
+notch_all_regions_no_noise <- build_expanded_comparison_table(
+  event_summary = event_peak_notch_summary,
+  soldevilla_expanded = soldevilla_reference_expanded,
+  output_group_to_use = "NO_noise_cluster0_excluded",
+  feature_type_to_use = "Notch",
+  soldevilla_regions_to_use = all_soldevilla_regions
+)
+
+# ------------------------------------------------------------
+# WITH noise tables: all regions only
+# ------------------------------------------------------------
+
+peak_all_regions_with_noise <- build_expanded_comparison_table(
+  event_summary = event_peak_notch_summary,
+  soldevilla_expanded = soldevilla_reference_expanded,
+  output_group_to_use = "WITH_noise_cluster0_included",
+  feature_type_to_use = "Peak",
+  soldevilla_regions_to_use = all_soldevilla_regions
+)
+
+notch_all_regions_with_noise <- build_expanded_comparison_table(
+  event_summary = event_peak_notch_summary,
+  soldevilla_expanded = soldevilla_reference_expanded,
+  output_group_to_use = "WITH_noise_cluster0_included",
+  feature_type_to_use = "Notch",
+  soldevilla_regions_to_use = all_soldevilla_regions
+)
+
+# ------------------------------------------------------------
+# Preview tables
+# ------------------------------------------------------------
+
+cat("Peak table: all Soldevilla regions, NO noise\n")
+print(peak_all_regions_no_noise)
+
+cat("\nNotch table: all Soldevilla regions, NO noise\n")
+print(notch_all_regions_no_noise)
+
+cat("\nPeak table: all Soldevilla regions, WITH noise\n")
+print(peak_all_regions_with_noise)
+
+cat("\nNotch table: all Soldevilla regions, WITH noise\n")
+print(notch_all_regions_with_noise)
+
+# ------------------------------------------------------------
+# Save CSV outputs: all regions only
+# ------------------------------------------------------------
+
+readr::write_csv(
+  peak_all_regions_no_noise,
+  file.path(
+    event_peak_notch_table_dir,
+    "expanded_peak_table_ALL_regions_NO_noise_PERMISSIVE.csv"
+  )
+)
+
+readr::write_csv(
+  notch_all_regions_no_noise,
+  file.path(
+    event_peak_notch_table_dir,
+    "expanded_notch_table_ALL_regions_NO_noise_PERMISSIVE.csv"
+  )
+)
+
+readr::write_csv(
+  peak_all_regions_with_noise,
+  file.path(
+    event_peak_notch_table_dir,
+    "expanded_peak_table_ALL_regions_WITH_noise_PERMISSIVE.csv"
+  )
+)
+
+readr::write_csv(
+  notch_all_regions_with_noise,
+  file.path(
+    event_peak_notch_table_dir,
+    "expanded_notch_table_ALL_regions_WITH_noise_PERMISSIVE.csv"
+  )
+)
+
+# ------------------------------------------------------------
+# Save feature-level sample sizes again for reference
+# ------------------------------------------------------------
+
+expanded_feature_n_check <- event_peak_notch_summary %>%
+  select(
+    output_group,
+    feature_type,
+    feature_label,
+    n_events_with_feature
+  ) %>%
+  arrange(
+    output_group,
+    feature_type,
+    feature_label
+  )
+
+readr::write_csv(
+  expanded_feature_n_check,
+  file.path(
+    event_peak_notch_table_dir,
+    "expanded_tables_our_data_feature_sample_sizes_PERMISSIVE.csv"
+  )
+)
+
+cat("\nPASS: Expanded all-region comparison tables created and saved.\n")
+cat("Saved to:\n")
+cat(event_peak_notch_table_dir, "\n")
+
+```
+
+## Style and Export Expanded Regional Comparison Tables
+## All regions only
+## Compact Soldevilla-style spacing
+## Creates PNG + HTML outputs for the 4 all-region tables
+
+```{r style_and_export_expanded_regional_tables_all_regions_only, message=FALSE, warning=FALSE}
+
+# ------------------------------------------------------------
+# Output folder for expanded comparison tables
+# ------------------------------------------------------------
+
+expanded_table_output_dir <- file.path(
+  event_peak_notch_base_dir,
+  "expanded_regional_comparison_tables_ALL_regions_only_PERMISSIVE"
+)
+
+dir.create(
+  expanded_table_output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# ------------------------------------------------------------
+# Helper: build dynamic column labels with N values
+# ------------------------------------------------------------
+
+make_region_column_labels <- function(input_table) {
+  
+  region_n_lookup <- c(
+    "SEUS" = "N = 15",
+    "NEUS" = "N = 8",
+    "GoMx" = "N = 7",
+    "IPH" = "N = 8",
+    "PPac" = "N = 6",
+    "CC" = "N = 25",
+    "Our Data" = "N = 48"
+  )
+  
+  label_list <- list()
+  
+  for (col_name in names(input_table)) {
+    
+    if (col_name == "Feature") {
+      
+      label_list[[col_name]] <- gt::md("Feature")
+      
+    } else if (col_name %in% names(region_n_lookup)) {
+      
+      label_list[[col_name]] <- gt::md(
+        paste0(col_name, "<br>", region_n_lookup[[col_name]])
+      )
+      
+    } else {
+      
+      label_list[[col_name]] <- gt::md(col_name)
+    }
+  }
+  
+  return(label_list)
+}
+
+# ------------------------------------------------------------
+# Helper: make one compact styled gt table
+# ------------------------------------------------------------
+
+make_expanded_gt_table <- function(
+    input_table,
+    title_text,
+    include_noise_footnote = FALSE
+) {
+  
+  column_labels <- make_region_column_labels(input_table)
+  
+  gt_table <- input_table %>%
+    gt::gt() %>%
+    gt::tab_header(
+      title = gt::md(title_text)
+    ) %>%
+    gt::cols_label(
+      .list = column_labels
+    ) %>%
+    gt::cols_align(
+      align = "center",
+      columns = everything()
+    ) %>%
+    gt::tab_style(
+      style = gt::cell_text(weight = "bold"),
+      locations = gt::cells_column_labels(everything())
+    ) %>%
+    gt::tab_options(
+      table.font.names = "Times New Roman",
+      table.font.size = gt::px(13),
+      heading.title.font.size = gt::px(13),
+      heading.title.font.weight = "normal",
+      column_labels.font.size = gt::px(13),
+      data_row.padding = gt::px(4),
+      column_labels.padding = gt::px(4),
+      table.width = gt::px(760),
+      table.border.top.width = gt::px(1),
+      table.border.bottom.width = gt::px(1),
+      column_labels.border.top.width = gt::px(1),
+      column_labels.border.bottom.width = gt::px(1),
+      table_body.hlines.width = gt::px(0.5)
+    ) %>%
+    gt::opt_css(
+      css = "
+      table.gt_table td, 
+      table.gt_table th {
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+        white-space: nowrap;
+      }
+      "
+    )
+  
+  if (include_noise_footnote) {
+    
+    gt_table <- gt_table %>%
+      gt::tab_footnote(
+        footnote = gt::md(
+          "Feature-level n varies when a peak or notch was not detected in every event; see `expanded_tables_our_data_feature_sample_sizes_PERMISSIVE.csv`."
+        ),
+        locations = gt::cells_column_labels(
+          columns = `Our Data`
+        )
+      )
+  }
+  
+  return(gt_table)
+}
+
+# ------------------------------------------------------------
+# Build gt objects: NO noise, all regions only
+# ------------------------------------------------------------
+
+gt_peak_all_regions_no_noise <- make_expanded_gt_table(
+  input_table = peak_all_regions_no_noise,
+  title_text = "Summary statistics (mean ± SD) for spectral peak frequencies (kHz).",
+  include_noise_footnote = FALSE
+)
+
+gt_notch_all_regions_no_noise <- make_expanded_gt_table(
+  input_table = notch_all_regions_no_noise,
+  title_text = "Summary statistics (mean ± SD) for spectral notch frequencies (kHz).",
+  include_noise_footnote = FALSE
+)
+
+# ------------------------------------------------------------
+# Build gt objects: WITH noise, all regions only
+# ------------------------------------------------------------
+
+gt_peak_all_regions_with_noise <- make_expanded_gt_table(
+  input_table = peak_all_regions_with_noise,
+  title_text = "Summary statistics (mean ± SD) for spectral peak frequencies (kHz).",
+  include_noise_footnote = TRUE
+)
+
+gt_notch_all_regions_with_noise <- make_expanded_gt_table(
+  input_table = notch_all_regions_with_noise,
+  title_text = "Summary statistics (mean ± SD) for spectral notch frequencies (kHz).",
+  include_noise_footnote = TRUE
+)
+
+# ------------------------------------------------------------
+# Display in knitted output
+# ------------------------------------------------------------
+
+gt_peak_all_regions_no_noise
+gt_notch_all_regions_no_noise
+
+gt_peak_all_regions_with_noise
+gt_notch_all_regions_with_noise
+
+# ------------------------------------------------------------
+# Helper: save gt table as HTML and PNG
+# ------------------------------------------------------------
+
+save_gt_html_and_png <- function(gt_object, base_filename) {
+  
+  html_file <- file.path(
+    expanded_table_output_dir,
+    paste0(base_filename, ".html")
+  )
+  
+  png_file <- file.path(
+    expanded_table_output_dir,
+    paste0(base_filename, ".png")
+  )
+  
+  gt::gtsave(
+    gt_object,
+    html_file
+  )
+  
+  tryCatch(
+    {
+      gt::gtsave(
+        gt_object,
+        png_file,
+        vwidth = 900,
+        vheight = 500,
+        zoom = 2
+      )
+      
+      cat("Saved HTML and PNG:", base_filename, "\n")
+    },
+    error = function(e) {
+      cat("Saved HTML only:", base_filename, "\n")
+      cat("PNG export failed with message:\n")
+      cat(e$message, "\n\n")
+    }
+  )
+}
+
+# ------------------------------------------------------------
+# Save all 4 outputs
+# ------------------------------------------------------------
+
+save_gt_html_and_png(
+  gt_peak_all_regions_no_noise,
+  "expanded_peak_ALL_regions_NO_noise_PERMISSIVE"
+)
+
+save_gt_html_and_png(
+  gt_notch_all_regions_no_noise,
+  "expanded_notch_ALL_regions_NO_noise_PERMISSIVE"
+)
+
+save_gt_html_and_png(
+  gt_peak_all_regions_with_noise,
+  "expanded_peak_ALL_regions_WITH_noise_PERMISSIVE"
+)
+
+save_gt_html_and_png(
+  gt_notch_all_regions_with_noise,
+  "expanded_notch_ALL_regions_WITH_noise_PERMISSIVE"
+)
+
+cat("\nPASS: Expanded all-region gt tables exported with compact spacing.\n")
+cat("Saved to:\n")
+cat(expanded_table_output_dir, "\n")
+
+```
+
+## Regional Peak/Notch Frequency Plots
+## Region on x-axis, frequency on y-axis
+## Mean point ± SD error bars
+## Separate folders for WITH noise and NO noise
+
+```{r regional_peak_notch_frequency_plots, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(readr)
+
+# ------------------------------------------------------------
+# Safety checks
+# ------------------------------------------------------------
+
+if (!exists("event_peak_notch_summary")) {
+  stop("event_peak_notch_summary does not exist. Run the event summary-statistics chunk first.")
+}
+
+if (!exists("soldevilla_reference_expanded")) {
+  stop("soldevilla_reference_expanded does not exist. Run the expanded Soldevilla reference chunk first.")
+}
+
+if (!exists("event_peak_notch_base_dir")) {
+  if (exists("event_peak_notch_table_dir")) {
+    event_peak_notch_base_dir <- dirname(event_peak_notch_table_dir)
+  } else {
+    stop("event_peak_notch_base_dir does not exist.")
+  }
+}
+
+# ------------------------------------------------------------
+# Output folders
+# ------------------------------------------------------------
+
+regional_plot_base_dir <- file.path(
+  event_peak_notch_base_dir,
+  "Regional_Peak_Notch_Plots_ALL_regions_only_PERMISSIVE"
+)
+
+regional_plot_no_noise_dir <- file.path(
+  regional_plot_base_dir,
+  "No Noise"
+)
+
+regional_plot_with_noise_dir <- file.path(
+  regional_plot_base_dir,
+  "With Noise"
+)
+
+dir.create(regional_plot_no_noise_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(regional_plot_with_noise_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("No-noise plots will save to:\n")
+cat(regional_plot_no_noise_dir, "\n\n")
+
+cat("With-noise plots will save to:\n")
+cat(regional_plot_with_noise_dir, "\n\n")
+
+# ------------------------------------------------------------
+# Feature colors
+# ------------------------------------------------------------
+
+peak_colors <- c(
+  "Peak 1" = "#377EB8",  # blue
+  "Peak 2" = "#FF7F00",  # orange
+  "Peak 3" = "#4DAF4A",  # green
+  "Peak 4" = "#984EA3"   # purple
+)
+
+notch_colors <- c(
+  "Notch 1" = "#377EB8", # blue
+  "Notch 2" = "#FF7F00", # orange
+  "Notch 3" = "#4DAF4A"  # green
+)
+
+# ------------------------------------------------------------
+# Region comparison sets
+# ------------------------------------------------------------
+
+comparison_sets <- list(
+  
+  all_regions = list(
+    label = "All Soldevilla Regions + Our Data",
+    regions = c("SEUS", "NEUS", "GoMx", "IPH", "PPac", "CC", "Our Data"),
+    width = 10.5
+  )
+)
+
+# ------------------------------------------------------------
+# Helper: build plot-ready data for one output group
+# ------------------------------------------------------------
+
+build_plot_ready_data <- function(output_group_to_use) {
+  
+  # Soldevilla values
+  soldevilla_plot_data <- soldevilla_reference_expanded %>%
+    mutate(
+      output_group = output_group_to_use,
+      source = "Soldevilla",
+      feature_type = if_else(
+        str_detect(feature_label, "Peak"),
+        "Peak",
+        "Notch"
+      ),
+      n_events_with_feature = N,
+      x_label = paste0(Region, "\nN = ", N)
+    ) %>%
+    select(
+      output_group,
+      source,
+      Region,
+      x_label,
+      feature_type,
+      feature_label,
+      mean_frequency_khz,
+      sd_frequency_khz,
+      n_events_with_feature
+    )
+  
+  # Our event-level values
+  our_data_plot_data <- event_peak_notch_summary %>%
+    filter(
+      output_group == output_group_to_use
+    ) %>%
+    mutate(
+      source = "Our Data",
+      Region = "Our Data",
+      x_label = if_else(
+        output_group_to_use == "WITH_noise_cluster0_included",
+        "Our Data\nN = 48 events*",
+        "Our Data\nN = 48 events"
+      )
+    ) %>%
+    select(
+      output_group,
+      source,
+      Region,
+      x_label,
+      feature_type,
+      feature_label,
+      mean_frequency_khz,
+      sd_frequency_khz,
+      n_events_with_feature
+    )
+  
+  bind_rows(
+    soldevilla_plot_data,
+    our_data_plot_data
+  )
+}
+
+# ------------------------------------------------------------
+# Helper: make one plot
+# ------------------------------------------------------------
+
+make_regional_frequency_plot <- function(
+    plot_data,
+    regions_to_use,
+    feature_type_to_use,
+    comparison_label,
+    noise_label,
+    output_file,
+    plot_width
+) {
+  
+  if (feature_type_to_use == "Peak") {
+    
+    feature_levels <- c("Peak 1", "Peak 2", "Peak 3", "Peak 4")
+    feature_colors <- peak_colors
+    y_limits <- c(19, 43)
+    title_text <- "Spectral Peak Frequencies by Region"
+    
+  } else if (feature_type_to_use == "Notch") {
+    
+    feature_levels <- c("Notch 1", "Notch 2", "Notch 3")
+    feature_colors <- notch_colors
+    y_limits <- c(21, 39)
+    title_text <- "Spectral Notch Frequencies by Region"
+    
+  } else {
+    
+    stop("feature_type_to_use must be either 'Peak' or 'Notch'.")
+  }
+  
+  plot_data_filtered <- plot_data %>%
+    filter(
+      Region %in% regions_to_use,
+      feature_type == feature_type_to_use
+    ) %>%
+    mutate(
+      Region = factor(
+        Region,
+        levels = regions_to_use
+      ),
+      feature_label = factor(
+        feature_label,
+        levels = feature_levels
+      )
+    )
+  
+  # Preserve ordered x-axis labels with N values
+  x_label_levels <- plot_data_filtered %>%
+    distinct(Region, x_label) %>%
+    arrange(Region) %>%
+    pull(x_label)
+  
+  plot_data_filtered <- plot_data_filtered %>%
+    mutate(
+      x_label = factor(
+        x_label,
+        levels = x_label_levels
+      )
+    )
+  
+  subtitle_text <- paste0(
+    comparison_label,
+    "; ",
+    noise_label
+  )
+  
+  if (noise_label == "with noise cluster 0 included") {
+    subtitle_text <- paste0(
+      subtitle_text,
+      "\n*Our Data uses a 48-event pool; feature-level n varies when a peak/notch was not detected."
+    )
+  }
+  
+  p <- ggplot(
+    plot_data_filtered,
+    aes(
+      x = x_label,
+      y = mean_frequency_khz,
+      color = feature_label
+    )
+  ) +
+    
+    # Error bars and points are NOT dodged.
+    # This keeps all features exactly aligned with their region.
+    geom_errorbar(
+      aes(
+        ymin = mean_frequency_khz - sd_frequency_khz,
+        ymax = mean_frequency_khz + sd_frequency_khz
+      ),
+      width = 0.12,
+      linewidth = 0.75,
+      alpha = 0.9
+    ) +
+    geom_point(
+      size = 3.2,
+      alpha = 0.95
+    ) +
+    scale_color_manual(
+      values = feature_colors,
+      breaks = feature_levels,
+      drop = FALSE
+    ) +
+    coord_cartesian(
+      ylim = y_limits
+    ) +
+    labs(
+      title = title_text,
+      subtitle = subtitle_text,
+      x = "Region",
+      y = "Frequency (kHz)",
+      color = "Feature"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(size = 10),
+      axis.text.x = element_text(size = 11),
+      axis.title = element_text(face = "bold"),
+      legend.position = "right",
+      panel.grid.minor = element_blank()
+    )
+  
+  print(p)
+  
+  ggsave(
+    filename = output_file,
+    plot = p,
+    width = plot_width,
+    height = 5.5,
+    dpi = 300
+  )
+  
+  return(p)
+}
+
+# ------------------------------------------------------------
+# Build plot-ready datasets
+# ------------------------------------------------------------
+
+plot_data_no_noise <- build_plot_ready_data(
+  output_group_to_use = "NO_noise_cluster0_excluded"
+)
+
+plot_data_with_noise <- build_plot_ready_data(
+  output_group_to_use = "WITH_noise_cluster0_included"
+)
+
+# ------------------------------------------------------------
+# Save plot-ready data
+# ------------------------------------------------------------
+
+readr::write_csv(
+  plot_data_no_noise,
+  file.path(
+    regional_plot_no_noise_dir,
+    "plot_ready_regional_peak_notch_data_NO_noise_PERMISSIVE.csv"
+  )
+)
+
+readr::write_csv(
+  plot_data_with_noise,
+  file.path(
+    regional_plot_with_noise_dir,
+    "plot_ready_regional_peak_notch_data_WITH_noise_PERMISSIVE.csv"
+  )
+)
+
+# ------------------------------------------------------------
+# Generate plots: NO noise
+# ------------------------------------------------------------
+
+for (comparison_name in names(comparison_sets)) {
+  
+  comparison_info <- comparison_sets[[comparison_name]]
+  
+  make_regional_frequency_plot(
+    plot_data = plot_data_no_noise,
+    regions_to_use = comparison_info$regions,
+    feature_type_to_use = "Peak",
+    comparison_label = comparison_info$label,
+    noise_label = "noise cluster 0 excluded",
+    output_file = file.path(
+      regional_plot_no_noise_dir,
+      paste0("regional_peak_frequencies_", comparison_name, "_NO_noise_PERMISSIVE.png")
+    ),
+    plot_width = comparison_info$width
+  )
+  
+  make_regional_frequency_plot(
+    plot_data = plot_data_no_noise,
+    regions_to_use = comparison_info$regions,
+    feature_type_to_use = "Notch",
+    comparison_label = comparison_info$label,
+    noise_label = "noise cluster 0 excluded",
+    output_file = file.path(
+      regional_plot_no_noise_dir,
+      paste0("regional_notch_frequencies_", comparison_name, "_NO_noise_PERMISSIVE.png")
+    ),
+    plot_width = comparison_info$width
+  )
+}
+
+# ------------------------------------------------------------
+# Generate plots: WITH noise
+# ------------------------------------------------------------
+
+for (comparison_name in names(comparison_sets)) {
+  
+  comparison_info <- comparison_sets[[comparison_name]]
+  
+  make_regional_frequency_plot(
+    plot_data = plot_data_with_noise,
+    regions_to_use = comparison_info$regions,
+    feature_type_to_use = "Peak",
+    comparison_label = comparison_info$label,
+    noise_label = "with noise cluster 0 included",
+    output_file = file.path(
+      regional_plot_with_noise_dir,
+      paste0("regional_peak_frequencies_", comparison_name, "_WITH_noise_PERMISSIVE.png")
+    ),
+    plot_width = comparison_info$width
+  )
+  
+  make_regional_frequency_plot(
+    plot_data = plot_data_with_noise,
+    regions_to_use = comparison_info$regions,
+    feature_type_to_use = "Notch",
+    comparison_label = comparison_info$label,
+    noise_label = "with noise cluster 0 included",
+    output_file = file.path(
+      regional_plot_with_noise_dir,
+      paste0("regional_notch_frequencies_", comparison_name, "_WITH_noise_PERMISSIVE.png")
+    ),
+    plot_width = comparison_info$width
+  )
+}
+
+cat("\nPASS: Regional peak/notch frequency plots created.\n")
+cat("No-noise plots saved to:\n")
+cat(regional_plot_no_noise_dir, "\n\n")
+
+cat("With-noise plots saved to:\n")
+cat(regional_plot_with_noise_dir, "\n")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
