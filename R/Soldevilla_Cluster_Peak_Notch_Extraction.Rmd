@@ -1224,18 +1224,28 @@ print(p_my_c6_sensitive)
 
 ```
 
-## New peak picking
+## New Peak Picking
 
 ```{r}
 
+cluster_colors_for_features <- c(
+  "0" = "grey60",
+  "1" = "#E41A1C",  # red
+  "2" = "#FF7F00",  # orange
+  "3" = "#FFD92F",  # yellow
+  "4" = "#4DAF4A",  # green
+  "5" = "#00BFC4",  # cyan
+  "6" = "#377EB8",  # blue
+  "7" = "#984EA3",  # purple
+  "8" = "#F781BF",  # pink
+  "9" = "#A65628",  # brown
+  "10" = "#999999",
+  "11" = "#66C2A5",
+  "12" = "#FC8D62"
+)
+
 # ------------------------------------------------------------
 # Permissive peak/notch picking for all MY clusters
-#
-# Settings chosen after Soldevilla comparison:
-#   nups = 1
-#   ndowns = 1
-#   minpeakdistance = 1
-#   minpeakheight = 0.15
 # ------------------------------------------------------------
 
 my_permissive_output_dir <- file.path(
@@ -1243,24 +1253,12 @@ my_permissive_output_dir <- file.path(
   "Peak_Notch_Picking_Permissive_After_Soldevilla_Comparison"
 )
 
-dir.create(
-  my_permissive_output_dir,
-  recursive = TRUE,
-  showWarnings = FALSE
-)
-
-# ------------------------------------------------------------
-# Load my cluster mean spectra
-# ------------------------------------------------------------
+dir.create(my_permissive_output_dir, recursive = TRUE, showWarnings = FALSE)
 
 my_cluster_spectra <- read.csv(
   "E:/Analysis/PCA_ICI_UMAP_HDBSCAN/18PC/18PC_scaledICI_1/tables/clean_cluster_mean_spectra_18PC_scaledICI_1_minPts50.csv",
   stringsAsFactors = FALSE
 )
-
-# ------------------------------------------------------------
-# Helper function for one cluster
-# ------------------------------------------------------------
 
 plot_my_cluster_permissive <- function(cluster_id) {
   
@@ -1272,6 +1270,12 @@ plot_my_cluster_permissive <- function(cluster_id) {
   if (nrow(cluster_df) == 0) {
     warning("No rows found for cluster ", cluster_id)
     return(NULL)
+  }
+  
+  cluster_line_color <- cluster_colors_for_features[[as.character(cluster_id)]]
+  
+  if (is.null(cluster_line_color) || is.na(cluster_line_color)) {
+    cluster_line_color <- "black"
   }
   
   peak_matrix <- pracma::findpeaks(
@@ -1340,7 +1344,7 @@ plot_my_cluster_permissive <- function(cluster_id) {
     cluster_df,
     aes(x = Frequency_kHz, y = mean_minmax_spectrum)
   ) +
-    geom_line(color = "steelblue", linewidth = 1.5) +
+    geom_line(color = cluster_line_color, linewidth = 1.5) +
     geom_point(
       data = feature_table,
       aes(
@@ -1401,14 +1405,8 @@ plot_my_cluster_permissive <- function(cluster_id) {
   feature_table
 }
 
-# ------------------------------------------------------------
-# Run for all observed non-noise clusters
-# ------------------------------------------------------------
-
 my_clusters_to_plot <- sort(
-  as.numeric(
-    unique(as.character(my_cluster_spectra$HDBSCAN_cluster))
-  )
+  as.numeric(unique(as.character(my_cluster_spectra$HDBSCAN_cluster)))
 )
 
 my_clusters_to_plot <- my_clusters_to_plot[my_clusters_to_plot != 0]
@@ -1418,23 +1416,6 @@ my_permissive_features_all <- purrr::map_dfr(
   plot_my_cluster_permissive
 )
 
-# ------------------------------------------------------------
-# Save full permissive feature table
-# ------------------------------------------------------------
-
-write.csv(
-  my_permissive_features_all,
-  file = file.path(
-    my_permissive_output_dir,
-    "My_clusters_all_permissive_peaks_notches_after_soldevilla.csv"
-  ),
-  row.names = FALSE
-)
-
-cat("Saved permissive cluster figures and table to:\n")
-cat(my_permissive_output_dir, "\n")
-
-# Save all detected permissive peaks/notches
 write.csv(
   my_permissive_features_all,
   file = file.path(
@@ -1444,7 +1425,6 @@ write.csv(
   row.names = FALSE
 )
 
-# Keep first 4 peaks and first 3 notches per cluster
 my_permissive_features_selected <- my_permissive_features_all %>%
   group_by(HDBSCAN_cluster, feature_type) %>%
   arrange(Frequency_kHz, .by_group = TRUE) %>%
@@ -1464,7 +1444,6 @@ write.csv(
   row.names = FALSE
 )
 
-# Optional wide summary table
 my_permissive_peak_notch_summary <- my_permissive_features_selected %>%
   mutate(
     feature_column = case_when(
@@ -1488,8 +1467,602 @@ write.csv(
   row.names = FALSE
 )
 
-cat("Saved all, selected, and wide peak/notch CSVs to:\n")
+cat("Saved color-matched permissive figures and CSVs to:\n")
 cat(my_permissive_output_dir, "\n")
+```
+
+## More Permissive Soldevilla Peak/Notch Picking - Standalone Chunk
+
+```{r}
+## More Permissive Soldevilla Peak/Notch Picking - Standalone Chunk
+
+# ------------------------------------------------------------
+# Purpose:
+# Re-run Soldevilla peak/notch picking with MORE permissive settings:
+#   nups = 1
+#   ndowns = 1
+#   minpeakdistance = 1
+#   minpeakheight = 0.15 for peaks
+#
+# This chunk is standalone:
+#   - It does not assume anything is already loaded in the R environment.
+#   - It reloads the MATLAB .fig file.
+#   - It extracts the 9 Soldevilla mean spectra again.
+#   - It saves outputs in a clearly labeled new folder.
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
+# Load packages
+# ------------------------------------------------------------
+
+required_packages <- c(
+  "dplyr",
+  "ggplot2",
+  "tidyr",
+  "readr",
+  "purrr",
+  "tibble",
+  "pracma",
+  "R.matlab"
+)
+
+missing_packages <- required_packages[
+  !sapply(required_packages, requireNamespace, quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing required packages: ",
+    paste(missing_packages, collapse = ", "),
+    "\nInstall these before running this chunk."
+  )
+}
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(readr)
+library(purrr)
+library(tibble)
+library(pracma)
+library(R.matlab)
+
+# ------------------------------------------------------------
+# Paths and settings
+# ------------------------------------------------------------
+
+soldevilla_input_dir <- "C:/Users/sarah/OneDrive/Documents/GitHub/Rissos_Geographic_Variation/Data/Soldevilla Clusters"
+
+mean_spectra_fig <- file.path(
+  soldevilla_input_dir,
+  "FinalColorCodedClusterMeans_9k9best.fig"
+)
+
+base_output_dir <- "E:/Analysis/Soldevilla Peaks and Notches"
+
+soldevilla_permissive_output_dir <- file.path(
+  base_output_dir,
+  "Soldevilla_MORE_PERMISSIVE_nups1_ndowns1_minpeakdistance1"
+)
+
+soldevilla_permissive_figure_dir <- file.path(
+  soldevilla_permissive_output_dir,
+  "Cluster Figures - MORE PERMISSIVE"
+)
+
+dir.create(soldevilla_permissive_output_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(soldevilla_permissive_figure_dir, recursive = TRUE, showWarnings = FALSE)
+
+freq_min_khz <- 20
+freq_max_khz <- 50
+
+# More permissive peak/notch settings
+peak_nups <- 1
+peak_ndowns <- 1
+peak_minpeakdistance <- 1
+peak_minpeakheight <- 0.15
+
+notch_nups <- 1
+notch_ndowns <- 1
+notch_minpeakdistance <- 1
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+cat("Mean spectra figure exists:\n")
+print(file.exists(mean_spectra_fig))
+
+cat("\nOutput directory exists:\n")
+print(dir.exists(soldevilla_permissive_output_dir))
+
+cat("\nMean spectra figure path:\n")
+cat(mean_spectra_fig, "\n")
+
+cat("\nMore permissive output directory:\n")
+cat(soldevilla_permissive_output_dir, "\n")
+
+if (!file.exists(mean_spectra_fig)) {
+  stop("Mean spectra MATLAB figure file not found. Check mean_spectra_fig path.")
+}
+
+# ------------------------------------------------------------
+# Load MATLAB .fig file
+# ------------------------------------------------------------
+
+mean_spectra_mat <- R.matlab::readMat(mean_spectra_fig)
+
+cat("\nLoaded MATLAB figure object.\n")
+
+# ------------------------------------------------------------
+# Extract figure children and line objects
+# ------------------------------------------------------------
+
+fig <- mean_spectra_mat[[1]]
+fig_children <- fig[[4]]
+
+axes_children <- fig_children[[4]]
+
+n_object_fields <- 5
+
+object_starts <- seq(
+  from = 1,
+  to = length(axes_children),
+  by = n_object_fields
+)
+
+object_types <- sapply(object_starts, function(i) {
+  as.character(axes_children[[i]][1, 1])
+})
+
+object_summary <- tibble(
+  object_index = seq_along(object_starts),
+  start_position = object_starts,
+  object_type = object_types
+)
+
+cat("\nObjects found in axes children:\n")
+print(object_summary)
+
+line_object_starts <- object_starts[
+  object_types == "graph2d.lineseries"
+]
+
+cat("\nNumber of line objects found:\n")
+print(length(line_object_starts))
+
+if (length(line_object_starts) != 9) {
+  stop("Expected 9 line objects, but found ", length(line_object_starts))
+}
+
+line_objects <- lapply(line_object_starts, function(i) {
+  list(
+    type = axes_children[[i]],
+    handle = axes_children[[i + 1]],
+    properties = axes_children[[i + 2]],
+    children = axes_children[[i + 3]],
+    special = axes_children[[i + 4]]
+  )
+})
+
+cat("\nPASS: Extracted 9 Soldevilla line objects.\n")
+
+# ------------------------------------------------------------
+# Helper: extract XData and YData from one line object
+# ------------------------------------------------------------
+
+extract_line_xy <- function(line_obj, line_number) {
+  
+  props <- line_obj$properties
+  prop_names <- dimnames(props)[[1]]
+  
+  x_index <- which(prop_names == "XData")
+  y_index <- which(prop_names == "YData")
+  
+  if (length(x_index) != 1 || length(y_index) != 1) {
+    stop("Could not uniquely find XData/YData for line ", line_number)
+  }
+  
+  x_data <- as.numeric(props[[x_index]])
+  y_data <- as.numeric(props[[y_index]])
+  
+  if (length(x_data) != length(y_data)) {
+    stop("XData and YData have different lengths for line ", line_number)
+  }
+  
+  tibble(
+    original_line_number = line_number,
+    Frequency_kHz = x_data,
+    mean_spectrum_raw = y_data
+  )
+}
+
+# ------------------------------------------------------------
+# Extract all 9 spectra
+# ------------------------------------------------------------
+
+soldevilla_mean_spectra_raw_more_permissive <- map2_dfr(
+  line_objects,
+  seq_along(line_objects),
+  extract_line_xy
+)
+
+cat("\nExtracted spectra table dimensions:\n")
+print(dim(soldevilla_mean_spectra_raw_more_permissive))
+
+cat("\nRows per original line:\n")
+print(
+  soldevilla_mean_spectra_raw_more_permissive %>%
+    count(original_line_number)
+)
+
+# ------------------------------------------------------------
+# Assign Soldevilla cluster numbers by vertical order
+# Top line = Cluster 1, bottom line = Cluster 9
+# ------------------------------------------------------------
+
+line_vertical_order_more_permissive <- soldevilla_mean_spectra_raw_more_permissive %>%
+  group_by(original_line_number) %>%
+  summarise(
+    mean_y_position = mean(mean_spectrum_raw, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_y_position)) %>%
+  mutate(
+    Soldevilla_cluster = row_number()
+  )
+
+cat("\nLine-to-cluster mapping:\n")
+print(line_vertical_order_more_permissive)
+
+soldevilla_mean_spectra_more_permissive <- soldevilla_mean_spectra_raw_more_permissive %>%
+  left_join(
+    line_vertical_order_more_permissive %>%
+      select(original_line_number, Soldevilla_cluster),
+    by = "original_line_number"
+  ) %>%
+  arrange(Soldevilla_cluster, Frequency_kHz)
+
+# ------------------------------------------------------------
+# Min-max normalize each Soldevilla cluster spectrum
+# ------------------------------------------------------------
+
+soldevilla_spectra_minmax_more_permissive <- soldevilla_mean_spectra_more_permissive %>%
+  group_by(Soldevilla_cluster) %>%
+  mutate(
+    spectrum_minmax =
+      (mean_spectrum_raw - min(mean_spectrum_raw, na.rm = TRUE)) /
+      (max(mean_spectrum_raw, na.rm = TRUE) - min(mean_spectrum_raw, na.rm = TRUE))
+  ) %>%
+  ungroup()
+
+# ------------------------------------------------------------
+# Save extracted normalized spectra
+# ------------------------------------------------------------
+
+write.csv(
+  soldevilla_spectra_minmax_more_permissive,
+  file = file.path(
+    soldevilla_permissive_output_dir,
+    "Soldevilla_extracted_mean_spectra_minmax_MORE_PERMISSIVE_input.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Helper: pick peaks and notches for one cluster
+# ------------------------------------------------------------
+
+pick_features_one_soldevilla_cluster_more_permissive <- function(cluster_df) {
+  
+  cluster_id <- unique(cluster_df$Soldevilla_cluster)
+  
+  if (length(cluster_id) != 1) {
+    stop("Expected one Soldevilla cluster per input dataframe.")
+  }
+  
+  cluster_df <- cluster_df %>%
+    arrange(Frequency_kHz)
+  
+  # Peaks = local maxima
+  peak_matrix <- pracma::findpeaks(
+    cluster_df$spectrum_minmax,
+    nups = peak_nups,
+    ndowns = peak_ndowns,
+    minpeakdistance = peak_minpeakdistance,
+    minpeakheight = peak_minpeakheight
+  )
+  
+  peak_table <- tibble()
+  
+  if (!is.null(peak_matrix)) {
+    peak_table <- tibble(
+      Soldevilla_cluster = cluster_id,
+      feature_type = "peak",
+      feature_height = peak_matrix[, 1],
+      feature_index = peak_matrix[, 2],
+      feature_start_index = peak_matrix[, 3],
+      feature_end_index = peak_matrix[, 4],
+      Frequency_kHz = cluster_df$Frequency_kHz[feature_index]
+    )
+  }
+  
+  # Notches = local minima, detected as peaks in inverted spectrum
+  notch_matrix <- pracma::findpeaks(
+    -cluster_df$spectrum_minmax,
+    nups = notch_nups,
+    ndowns = notch_ndowns,
+    minpeakdistance = notch_minpeakdistance
+  )
+  
+  notch_table <- tibble()
+  
+  if (!is.null(notch_matrix)) {
+    notch_table <- tibble(
+      Soldevilla_cluster = cluster_id,
+      feature_type = "notch",
+      feature_height = -notch_matrix[, 1],
+      feature_index = notch_matrix[, 2],
+      feature_start_index = notch_matrix[, 3],
+      feature_end_index = notch_matrix[, 4],
+      Frequency_kHz = cluster_df$Frequency_kHz[feature_index]
+    )
+  }
+  
+  bind_rows(peak_table, notch_table) %>%
+    arrange(Frequency_kHz)
+}
+
+# ------------------------------------------------------------
+# Apply more permissive peak/notch picking to all 9 clusters
+# ------------------------------------------------------------
+
+soldevilla_features_all_more_permissive <- soldevilla_spectra_minmax_more_permissive %>%
+  group_by(Soldevilla_cluster) %>%
+  group_split() %>%
+  map_dfr(pick_features_one_soldevilla_cluster_more_permissive)
+
+# If features were found, number them within feature type
+if (nrow(soldevilla_features_all_more_permissive) > 0) {
+  
+  soldevilla_features_all_more_permissive <- soldevilla_features_all_more_permissive %>%
+    group_by(Soldevilla_cluster, feature_type) %>%
+    arrange(Frequency_kHz, .by_group = TRUE) %>%
+    mutate(
+      feature_number = row_number(),
+      feature_label = case_when(
+        feature_type == "peak" ~ paste0("Peak_", feature_number),
+        feature_type == "notch" ~ paste0("Notch_", feature_number)
+      )
+    ) %>%
+    ungroup()
+}
+
+cat("\nMORE PERMISSIVE detected Soldevilla peaks and notches:\n")
+print(soldevilla_features_all_more_permissive, n = Inf)
+
+# ------------------------------------------------------------
+# Save full feature table
+# ------------------------------------------------------------
+
+write.csv(
+  soldevilla_features_all_more_permissive,
+  file = file.path(
+    soldevilla_permissive_output_dir,
+    "Soldevilla_ALL_detected_peaks_notches_MORE_PERMISSIVE_nups1_ndowns1_minpeakdistance1.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Keep first 4 peaks and first 3 notches per cluster
+# First = ordered from low frequency to high frequency
+# ------------------------------------------------------------
+
+soldevilla_features_selected_more_permissive <- soldevilla_features_all_more_permissive %>%
+  group_by(Soldevilla_cluster, feature_type) %>%
+  arrange(Frequency_kHz, .by_group = TRUE) %>%
+  mutate(feature_number = row_number()) %>%
+  filter(
+    (feature_type == "peak" & feature_number <= 4) |
+      (feature_type == "notch" & feature_number <= 3)
+  ) %>%
+  ungroup()
+
+cat("\nMORE PERMISSIVE selected Soldevilla peaks/notches:\n")
+print(soldevilla_features_selected_more_permissive, n = Inf)
+
+write.csv(
+  soldevilla_features_selected_more_permissive,
+  file = file.path(
+    soldevilla_permissive_output_dir,
+    "Soldevilla_SELECTED_first4_peaks_first3_notches_MORE_PERMISSIVE_nups1_ndowns1_minpeakdistance1.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Make wide summary table
+# ------------------------------------------------------------
+
+soldevilla_peak_notch_summary_more_permissive <- soldevilla_features_selected_more_permissive %>%
+  mutate(
+    feature_column = case_when(
+      feature_type == "peak" ~ paste0("Peak_", feature_number, "_kHz"),
+      feature_type == "notch" ~ paste0("Notch_", feature_number, "_kHz")
+    )
+  ) %>%
+  select(
+    Soldevilla_cluster,
+    feature_column,
+    Frequency_kHz
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = feature_column,
+    values_from = Frequency_kHz
+  ) %>%
+  arrange(Soldevilla_cluster)
+
+# Ensure expected columns exist even if one cluster has fewer peaks/notches
+expected_summary_cols <- c(
+  "Soldevilla_cluster",
+  "Peak_1_kHz",
+  "Peak_2_kHz",
+  "Peak_3_kHz",
+  "Peak_4_kHz",
+  "Notch_1_kHz",
+  "Notch_2_kHz",
+  "Notch_3_kHz"
+)
+
+missing_summary_cols <- setdiff(
+  expected_summary_cols,
+  names(soldevilla_peak_notch_summary_more_permissive)
+)
+
+for (missing_col in missing_summary_cols) {
+  soldevilla_peak_notch_summary_more_permissive[[missing_col]] <- NA_real_
+}
+
+soldevilla_peak_notch_summary_more_permissive <- soldevilla_peak_notch_summary_more_permissive %>%
+  select(all_of(expected_summary_cols))
+
+cat("\nMORE PERMISSIVE wide Soldevilla peak/notch summary table:\n")
+print(soldevilla_peak_notch_summary_more_permissive)
+
+write.csv(
+  soldevilla_peak_notch_summary_more_permissive,
+  file = file.path(
+    soldevilla_permissive_output_dir,
+    "Soldevilla_WIDE_first4_peaks_first3_notches_MORE_PERMISSIVE_nups1_ndowns1_minpeakdistance1.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# Plot helper: one Soldevilla cluster with all detected features
+# ------------------------------------------------------------
+
+plot_soldevilla_cluster_more_permissive <- function(cluster_id) {
+  
+  cluster_spectrum <- soldevilla_spectra_minmax_more_permissive %>%
+    filter(Soldevilla_cluster == cluster_id) %>%
+    arrange(Frequency_kHz)
+  
+  cluster_features <- soldevilla_features_all_more_permissive %>%
+    filter(Soldevilla_cluster == cluster_id) %>%
+    mutate(
+      feature_type = factor(feature_type, levels = c("peak", "notch")),
+      label_text = paste0(round(Frequency_kHz, 1), " kHz"),
+      label_y = case_when(
+        feature_type == "peak" ~ feature_height + 0.06,
+        feature_type == "notch" ~ feature_height - 0.06
+      ),
+      label_vjust = case_when(
+        feature_type == "peak" ~ 0,
+        feature_type == "notch" ~ 1
+      )
+    )
+  
+  p <- ggplot(
+    cluster_spectrum,
+    aes(x = Frequency_kHz, y = spectrum_minmax)
+  ) +
+    geom_line(
+      color = "grey45",
+      linewidth = 1.4
+    ) +
+    geom_point(
+      data = cluster_features,
+      aes(
+        x = Frequency_kHz,
+        y = feature_height,
+        shape = feature_type,
+        fill = feature_type
+      ),
+      color = "black",
+      size = 3.2,
+      stroke = 0.8
+    ) +
+    geom_text(
+      data = cluster_features,
+      aes(
+        x = Frequency_kHz,
+        y = label_y,
+        label = label_text,
+        vjust = label_vjust
+      ),
+      size = 3.2,
+      color = "black"
+    ) +
+    scale_shape_manual(
+      values = c(
+        "peak" = 24,
+        "notch" = 25
+      )
+    ) +
+    scale_fill_manual(
+      values = c(
+        "peak" = "black",
+        "notch" = "white"
+      )
+    ) +
+    coord_cartesian(
+      ylim = c(-0.12, 1.12),
+      xlim = c(freq_min_khz, freq_max_khz),
+      clip = "off"
+    ) +
+    labs(
+      title = paste0(
+        "MORE PERMISSIVE Peaks and Notches: Soldevilla Cluster ",
+        cluster_id
+      ),
+      subtitle = paste0(
+        "nups = ", peak_nups,
+        ", ndowns = ", peak_ndowns,
+        ", minpeakdistance = ", peak_minpeakdistance,
+        ", peak minheight = ", peak_minpeakheight
+      ),
+      x = "Frequency (kHz)",
+      y = "Min-max normalized amplitude",
+      shape = "Feature",
+      fill = "Feature"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      legend.position = "right",
+      plot.title = element_text(face = "bold"),
+      plot.margin = margin(10, 35, 10, 10)
+    )
+  
+  print(p)
+  
+  ggsave(
+    filename = file.path(
+      soldevilla_permissive_figure_dir,
+      paste0(
+        "Soldevilla_Cluster_",
+        cluster_id,
+        "_MORE_PERMISSIVE_peaks_notches_nups1_ndowns1_minpeakdistance1.png"
+      )
+    ),
+    plot = p,
+    width = 10,
+    height = 6,
+    dpi = 300
+  )
+}
+
+# ------------------------------------------------------------
+# Generate diagnostic figures for all 9 Soldevilla clusters
+# ------------------------------------------------------------
+
+for (cluster_id in sort(unique(soldevilla_spectra_minmax_more_permissive$Soldevilla_cluster))) {
+  plot_soldevilla_cluster_more_permissive(cluster_id)
+}
+
+cat("\nDONE: Saved MORE PERMISSIVE Soldevilla peak/notch CSVs and figures to:\n")
+cat(soldevilla_permissive_output_dir, "\n")
 
 ```
 
